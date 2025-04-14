@@ -27,7 +27,7 @@ def plot_mse(pred_qs, true_qs, title="MSE over Time"):
     plt.show()
 
 # Load training data
-with open('train.txt', 'r') as f:
+with open('../data/train.txt', 'r') as f:
     data = [list(map(float, line.strip().split())) for line in f if line.strip()]
 tensor_data = torch.tensor(data, dtype=torch.float32).T
 train_p = tensor_data[:2, :1200].T  # momentum (v1, v2)
@@ -36,7 +36,7 @@ target_p = tensor_data[:2, 1:1201].T
 target_q = tensor_data[2:, 1:1201].T
 
 # Load testing data
-with open('test.txt', 'r') as f:
+with open('../data/test.txt', 'r') as f:
     data = [list(map(float, line.strip().split())) for line in f if line.strip()]
 tensor_data = torch.tensor(data, dtype=torch.float32).T
 test_p = tensor_data[:2, :].T
