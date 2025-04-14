@@ -205,7 +205,7 @@ def evaluate_and_plot(model, X_test, steps=300):
 
 if __name__ == "__main__":
     # Load training data
-    with open('train.txt', 'r') as f:
+    with open('../code/train.txt', 'r') as f:
         data = [list(map(float, line.strip().split())) for line in f if line.strip()]
     tensor_data = torch.tensor(data, dtype=torch.float32).T
     train_p = tensor_data[:2, :1200].T  # momentum (v1, v2)
@@ -214,7 +214,7 @@ if __name__ == "__main__":
     target_q = tensor_data[2:, 1:1201].T
 
     # Load testing data
-    with open('test.txt', 'r') as f:
+    with open('../code/test.txt', 'r') as f:
         data = [list(map(float, line.strip().split())) for line in f if line.strip()]
     tensor_data = torch.tensor(data, dtype=torch.float32).T
     test_p = tensor_data[:2, :].T
