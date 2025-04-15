@@ -49,7 +49,7 @@ class ExtendedSympNet(nn.Module):
         self.S = nn.Parameter(torch.zeros(self.active_dim, self.active_dim))
         torch.nn.init.normal_(self.S, 0, 0.1)
 
-        self.alpha = nn.Parameter(torch.tensor(0.01))
+        self.alpha = nn.Parameter(torch.tensor(0.001))
 
     def forward(self, z, dt=0.1):
         z_active = z[:, :self.active_dim]  # z1, z2
@@ -69,10 +69,10 @@ class ExtendedSympNet(nn.Module):
         dHdz2 = torch.autograd.grad(H, z2, create_graph=True)[0]
 
         # Enforce skew-symmetric structure on S
-        self.S = self.S - self.S.t()
+        S = self.S - self.S.t()
 
-        dz1 = dHdz2 * self.dt_q + self.alpha * (z_active @ self.S.t())[:, :2]
-        dz2 = -dHdz1 * self.dt_p + self.alpha * (z_active @ self.S)[:, 2:]
+        dz1 = dHdz2 * self.dt_q + self.alpha * (z_active @ S.t())[:, :2]
+        dz2 = -dHdz1 * self.dt_p + self.alpha * (z_active @ S)[:, 2:]
 
         z_active_new = z_active + dt * torch.cat([dz1, dz2], dim=1)
         z_new = torch.cat([z_active_new, z_aux], dim=1)
@@ -115,6 +115,9 @@ def train_pnn(model, X_train, y_train, epochs=100, lr=0.001):
 
     for epoch in range(epochs):
         optimizer.zero_grad()
+        perm = torch.randperm(X_train.size(0))
+        X_train = X_train[perm]
+        y_train = y_train[perm]
 
         pred_y = model.forward(X_train)
 
@@ -133,12 +136,10 @@ def train_pnn(model, X_train, y_train, epochs=100, lr=0.001):
 
         mse_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        if epochs % 200:
-            model.sympNet.enforce_symplecticity()
 
-        if epochs % 1000 == 0:
-            lr/=2
+        optimizer.step()
+        if epochs % 100:
+            model.sympNet.enforce_symplecticity()
 
         # Optional symplecticity enforcement
         if epoch % 100 == 0:
@@ -205,7 +206,7 @@ def evaluate_and_plot(model, X_test, steps=300):
 
 if __name__ == "__main__":
     # Load training data
-    with open('../code/train.txt', 'r') as f:
+    with open('../data/train.txt', 'r') as f:
         data = [list(map(float, line.strip().split())) for line in f if line.strip()]
     tensor_data = torch.tensor(data, dtype=torch.float32).T
     train_p = tensor_data[:2, :1200].T  # momentum (v1, v2)
@@ -214,7 +215,7 @@ if __name__ == "__main__":
     target_q = tensor_data[2:, 1:1201].T
 
     # Load testing data
-    with open('../code/test.txt', 'r') as f:
+    with open('../data/test.txt', 'r') as f:
         data = [list(map(float, line.strip().split())) for line in f if line.strip()]
     tensor_data = torch.tensor(data, dtype=torch.float32).T
     test_p = tensor_data[:2, :].T
@@ -239,7 +240,7 @@ if __name__ == "__main__":
     
     # Train the model
     print("Starting training...")
-    pnn = train_pnn(pnn, X_train, y_train, epochs=500, lr=0.001)
+    pnn = train_pnn(pnn, X_train, y_train, epochs=5000, lr=0.002)
     print("Training complete!")
     
     # Evaluate and visualize results
