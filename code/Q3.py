@@ -9,7 +9,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 class PINNS(nn.Module):
-    def __init__(self,hidden_dim,q=4):
+    def __init__(self, hidden_dim, q=4):
         super().__init__()
 
         # The neural network
@@ -22,14 +22,14 @@ class PINNS(nn.Module):
         )
 
         # 4 learnable parameters
-        self.lambda1 = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
-        self.lambda2 = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
-        self.lambda3 = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
-        self.lambda4 = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
+        self.lambda1 = nn.Parameter(torch.randn(1) * 0.1 + 0.5).to(device)
+        self.lambda2 = nn.Parameter(torch.randn(1) * 0.1 + 0.5).to(device)
+        self.lambda3 = nn.Parameter(torch.randn(1) * 0.1 + 0.5).to(device)
+        self.lambda4 = nn.Parameter(torch.randn(1) * 0.1 + 0.5).to(device)
 
         # Load IRK weights from file
         file_path = f'../data/Utilities/IRK_weights/Butcher_IRK{q}.txt'
-        tmp = torch.from_numpy(np.loadtxt(file_path, ndmin=2).astype(np.float32))
+        tmp = torch.from_numpy(np.loadtxt(file_path, ndmin=2).astype(np.float32)).to(device)
 
         # Extract and reshape the weights
         weights = tmp[:q**2 + q].reshape(q + 1, q)
@@ -37,45 +37,42 @@ class PINNS(nn.Module):
         self.IRK_beta = weights[-1:, :].to(device)   # shape (1, q)
         self.IRK_times = tmp[q**2 + q:].to(device)   # shape (q,)
 
-
     def forward(self, X0, dt=0.1):
         batch_size = X0.shape[0]
 
-        X0_expanded = X0.unsqueeze(1).repeat(1, self.IRK_alpha.shape[0], 1)  
+        X0_expanded = X0.unsqueeze(1).repeat(1, self.IRK_alpha.shape[0], 1).to(device)  # (B, q, 4)
 
-        X_input = X0_expanded.view(-1, 4)
+        X_input = X0_expanded.view(-1, 4).to(device)
 
-        H_out = self.H_net(X_input)  
+        H_out = self.H_net(X_input)  # (B * q, 4)
 
-        H_out = H_out.view(batch_size, self.IRK_alpha.shape[0], 4)
+        H_out = H_out.view(batch_size, self.IRK_alpha.shape[0], 4).to(device)
 
-        stage_sum = torch.einsum('bqi,ij->bqj', H_out, self.IRK_alpha)  
+        stage_sum = torch.einsum('bqi,ij->bqj', H_out, self.IRK_alpha).to(device)  # (B, q, 4)
 
-        X_stages = X0.unsqueeze(1) + dt * stage_sum  
+        X_stages = X0.unsqueeze(1) + dt * stage_sum  # (B, q, 4)
 
-        final_sum = torch.einsum('bqi,ij->bqj', H_out, self.IRK_beta)  
-        X_pred = X0 + dt * final_sum.squeeze(1)  
+        final_sum = torch.einsum('bqi,ij->bqj', H_out, self.IRK_beta).to(device)  # (B, 1, 4)
+        X_pred = X0 + dt * final_sum.squeeze(1)  # (B, 4)
 
         return X_pred
 
     def compute_residual_loss(self, X0, dt):
-
         B = X0.shape[0]
         q = self.IRK_alpha.shape[0]
 
-        X0_expanded = X0.unsqueeze(1).repeat(1, q, 1)  # (B, q, 4)
-
+        X0_expanded = X0.unsqueeze(1).repeat(1, q, 1).to(device)  # (B, q, 4)
         X0_expanded.requires_grad_(True)
 
-        input_stages = X0_expanded.reshape(-1, 4)  
-        
-        H = self.H_net(input_stages)  
-        H = H.view(B, q, 4)
+        input_stages = X0_expanded.reshape(-1, 4).to(device)  # (B * q, 4)
+
+        H = self.H_net(input_stages)  # (B * q, 4)
+        H = H.view(B, q, 4).to(device)
 
         H_pred = X0.unsqueeze(1) + dt * torch.matmul(self.IRK_alpha, H)  # (B, q, 4)
 
         H_pred_flat = H_pred.view(-1, 4)
-        H_new = self.H_net(H_pred_flat).view(B, q, 4)
+        H_new = self.H_net(H_pred_flat).view(B, q, 4).to(device)
 
         X1_pred = X0 + dt * torch.matmul(self.IRK_beta, H_new).squeeze(1)  # (B, 4)
 
@@ -84,17 +81,13 @@ class PINNS(nn.Module):
         loss = torch.mean(residual ** 2)
         return loss
 
-
-
     def predict(self, x, steps):
         trajectory = [x]
         for _ in range(steps):
-            x = x.clone().detach().requires_grad_(True)
+            x = x.clone().detach().requires_grad_(True).to(device)
             x = self.forward(x)
             trajectory.append(x)
         return torch.stack(trajectory).squeeze(1)
-
-
 
 # Evaluation function with proper plotting
 def evaluate_and_plot(model, X_test, steps=300):
@@ -103,7 +96,7 @@ def evaluate_and_plot(model, X_test, steps=300):
     # Get initial point for trajectory prediction
     initial_state = X_test[0:1].clone().detach().requires_grad_(True).to(device)
     # Ground truth trajectory from test data
-    ground_truth = X_test[:steps+1]
+    ground_truth = X_test[:steps+1].to(device)
     
     # Generate multi-step prediction
     predicted_trajectory = model.predict(initial_state, steps)
@@ -155,7 +148,7 @@ if __name__ == "__main__":
     # Load training data
     with open('../data/train.txt', 'r') as f:
         data = [list(map(float, line.strip().split())) for line in f if line.strip()]
-    tensor_data = torch.tensor(data, dtype=torch.float32).T
+    tensor_data = torch.tensor(data, dtype=torch.float32).T.to(device)
     train_p = tensor_data[:2, :1200].T  # momentum (v1, v2)
     train_q = tensor_data[2:, :1200].T  # position (x1, x2)
     target_p = tensor_data[:2, 1:1201].T
@@ -164,23 +157,21 @@ if __name__ == "__main__":
     # Load testing data
     with open('../data/test.txt', 'r') as f:
         data = [list(map(float, line.strip().split())) for line in f if line.strip()]
-    tensor_data = torch.tensor(data, dtype=torch.float32).T
+    tensor_data = torch.tensor(data, dtype=torch.float32).T.to(device)
     test_p = tensor_data[:2, :].T
     test_q = tensor_data[2:, :].T
 
     # Create training and target tensors
-    X_train = torch.cat([train_p, train_q], dim=1)
-    y_train = torch.cat([target_p, target_q], dim=1)
+    X_train = torch.cat([train_p, train_q], dim=1).to(device)
+    y_train = torch.cat([target_p, target_q], dim=1).to(device)
 
     # Create test tensors
-    X_test = torch.cat([test_p, test_q], dim=1)
-    y_test = X_test[1:].clone()  # The target is the next state in the sequence
-    X_train = X_train.to(device)
-    y_train = y_train.to(device)
-    X_test = X_test.to(device)
+    X_test = torch.cat([test_p, test_q], dim=1).to(device)
+    y_test = X_test[1:].clone().to(device)  # The target is the next state in the sequence
 
     # Set random seed for reproducibility
     torch.manual_seed(42)
+    
     # Initialize PNN model
     pnn = PINNS(128).to(device)
 
@@ -200,28 +191,22 @@ if __name__ == "__main__":
     # Training loop
     print("Starting training...")
 
-    for epoch in range(1, epochs + 1):
-        total_loss = 0.0
-
-        for batch in train_loader:
-            X0 = batch[0].to(device)  # (B, 4)
+    for epoch in range(epochs):
+        pnn.train()
+        running_loss = 0.0
+        for X_batch, y_batch in train_loader:
+            X_batch, y_batch = X_batch.to(device), y_batch.to(device)
 
             optimizer.zero_grad()
-            loss = pnn.compute_residual_loss(X0, dt)
+            loss = pnn.compute_residual_loss(X_batch, dt)
             loss.backward()
             optimizer.step()
+            
+            running_loss += loss.item()
 
-            total_loss += loss.item()
+        avg_loss = running_loss / len(train_loader)
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {avg_loss:.6f}")
 
-        if epoch % 100 == 0:
-            avg_loss = total_loss / len(train_loader)
-            print(f"[Epoch {epoch}] Loss: {avg_loss:.6f} | λ1={pnn.lambda1.item():.3f} λ2={pnn.lambda2.item():.3f}")
-
-
-    print("Training complete!")
-    
-    # Evaluate and visualize results
-    print("Evaluating model...")
+    # Evaluate model
     avg_mse, predicted_trajectory = evaluate_and_plot(pnn, X_test)
-    
-    print("Done!")
+    print(f"Average MSE: {avg_mse}")
