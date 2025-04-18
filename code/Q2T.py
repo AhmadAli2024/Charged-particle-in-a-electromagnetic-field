@@ -43,13 +43,13 @@ class ExtendedSympNet(nn.Module):
             nn.Linear(hidden_dim, 1)
         )
 
-        self.dt_q = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
-        self.dt_p = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
-
         self.S = nn.Parameter(torch.zeros(self.active_dim, self.active_dim))
         torch.nn.init.normal_(self.S, 0, 0.1)
 
-        self.alpha = nn.Parameter(torch.tensor(0.001))
+        self.dt_q = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
+        self.dt_p = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
+
+        self.alpha = nn.Parameter(torch.tensor(0.01))
 
     def forward(self, z, dt=0.1):
         z_active = z[:, :self.active_dim]  # z1, z2
@@ -92,7 +92,7 @@ class ExtendedSympNet(nn.Module):
 class PNN(nn.Module):
     def __init__(self):
         super().__init__()
-        self.transformer = NICECouplingLayer(4, 128)
+        self.transformer = NICECouplingLayer(4, 125)
         self.sympNet = ExtendedSympNet(4)
 
     def forward(self, x):
@@ -118,8 +118,8 @@ def train_pnn(model, X_train, y_train, epochs=100, lr=0.001):
         perm = torch.randperm(X_train.size(0))
         X_train = X_train[perm]
         y_train = y_train[perm]
-        X_train = X_train[:64]
-        y_train = y_train[:64]
+        X_train = X_train[:1]
+        y_train = y_train[:1]
 
         pred_y = model.forward(X_train)
 
@@ -242,7 +242,7 @@ if __name__ == "__main__":
     
     # Train the model
     print("Starting training...")
-    pnn = train_pnn(pnn, X_train, y_train, epochs=10000, lr=0.001)
+    pnn = train_pnn(pnn, X_train, y_train, epochs=300000, lr=0.001)
     print("Training complete!")
     
     # Evaluate and visualize results
