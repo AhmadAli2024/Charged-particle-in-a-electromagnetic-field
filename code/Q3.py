@@ -41,7 +41,7 @@ class PINNS(nn.Module):
         batch_size = X0.shape[0]
 
         # Fix: Ensure X0_expanded is correctly shaped for repeat
-        X0_expanded = X0.unsqueeze(1).expand(-1, self.IRK_alpha.shape[0], -1)  # (B, q, 4)
+        X0_expanded = X0.squeeze(1).expand(-1, self.IRK_alpha.shape[0], -1)  # (B, q, 4)
 
         X_input = X0_expanded.view(-1, 4).to(device)
 
