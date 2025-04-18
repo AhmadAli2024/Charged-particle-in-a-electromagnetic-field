@@ -40,7 +40,8 @@ class PINNS(nn.Module):
     def forward(self, X0, dt=0.1):
         batch_size = X0.shape[0]
 
-        X0_expanded = X0.unsqueeze(1).repeat(1, self.IRK_alpha.shape[0], 1).to(device)  # (B, q, 4)
+        # Fix: Ensure X0_expanded is correctly shaped for repeat
+        X0_expanded = X0.unsqueeze(1).expand(-1, self.IRK_alpha.shape[0], -1)  # (B, q, 4)
 
         X_input = X0_expanded.view(-1, 4).to(device)
 
@@ -61,7 +62,7 @@ class PINNS(nn.Module):
         B = X0.shape[0]
         q = self.IRK_alpha.shape[0]
 
-        X0_expanded = X0.unsqueeze(1).repeat(1, q, 1).to(device)  # (B, q, 4)
+        X0_expanded = X0.unsqueeze(1).expand(-1, q, -1).to(device)  # (B, q, 4)
         X0_expanded.requires_grad_(True)
 
         input_stages = X0_expanded.reshape(-1, 4).to(device)  # (B * q, 4)
@@ -79,6 +80,8 @@ class PINNS(nn.Module):
         residual = X1_pred - (X0 + dt * torch.matmul(self.IRK_beta, H).squeeze(1))
 
         loss = torch.mean(residual ** 2)
+        print(f"Residual Loss: {loss.item()}")  # Debugging step to check residual loss
+
         return loss
 
     def predict(self, x, steps):
