@@ -12,7 +12,6 @@ class PINNS(nn.Module):
     def __init__(self, hidden_dim, q=4):
         super().__init__()
 
-        # Deeper neural network with more hidden layers
         self.model = nn.Sequential(
             nn.Linear(4, hidden_dim),
             nn.Tanh(),
@@ -23,26 +22,23 @@ class PINNS(nn.Module):
             nn.Linear(hidden_dim, 4)
         )
 
-        # 4 learnable parameters for the Hamiltonian system
+        # 4 learnable parameters
         self.lambda1 = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
         self.lambda2 = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
         self.lambda3 = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
         self.lambda4 = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
 
-        # Load IRK weights from file
+        # Load IRK weights
         file_path = f'../data/Utilities/IRK_weights/Butcher_IRK{q}.txt'
         try:
             tmp = torch.from_numpy(np.loadtxt(file_path, ndmin=2).astype(np.float32))
-            
-            # Extract and reshape the weights
             weights = tmp[:q**2 + q].reshape(q + 1, q)
-            self.IRK_alpha = weights[:-1, :].to(device)  # shape (q, q)
-            self.IRK_beta = weights[-1:, :].to(device)   # shape (1, q)
-            self.IRK_times = tmp[q**2 + q:].to(device)   # shape (q,)
+            self.IRK_alpha = weights[:-1, :].to(device)
+            self.IRK_beta = weights[-1:, :].to(device)
+            self.IRK_times = tmp[q**2 + q:].to(device)
         except FileNotFoundError:
             print(f"Warning: IRK weights file not found at {file_path}")
             print("Initializing with default values")
-            # Initialize with some default values (for Gauss-Legendre IRK4)
             self.IRK_alpha = torch.tensor([[0.25, -0.0625], [0.25, 0.25]]).to(device)
             self.IRK_beta = torch.tensor([[0.5, 0.5]]).to(device)
             self.IRK_times = torch.tensor([0.5 - np.sqrt(3)/6, 0.5 + np.sqrt(3)/6]).to(device)
@@ -51,57 +47,55 @@ class PINNS(nn.Module):
         return self.model(X0)
 
     def loss(self, true, pred, dt=0.1):
-        Rv = true/(100*(true.pow(2).sum(dim=2)).pow(3/2,dim=1)) - (pred[:2]*dt)
-        Rx = true[:2]-(pred[2:]*dt)
-        Rl = lambda1*Rv + lambda2*Rx
-        L = lambda3*((pred[:2]-true[:2]).pow(2,dim=1)) + lambda4((pred[2:]-true[2:]).pow(2,dim=1))
-        return Rl+L
+        v_true = true[:, :2]
+        x_true = true[:, 2:]
+        v_pred = pred[:, :2]
+        x_pred = pred[:, 2:]
 
-    def train_pinn(self, X_train, y_train, epochs=100, lr=0.001):
+        x_norm = torch.norm(x_true, dim=1, keepdim=True)
+        coulomb_term = x_true / (100 * x_norm**3 + 1e-8)
+
+        dvdt = (v_pred - v_true) / dt
+        dxdt = (x_pred - x_true) / dt
+
+        Rv = coulomb_term - dvdt
+        Rx = v_true - dxdt
+
+        Rl = self.lambda1 * torch.mean(Rv**2) + self.lambda2 * torch.mean(Rx**2)
+        L = self.lambda3 * F.mse_loss(v_pred, v_true) + self.lambda4 * F.mse_loss(x_pred, x_true)
+
+        return Rl + L
+
+    def train_pinn(self, X_train, y_train, epochs=100, lr=0.001, dt=0.1):
         optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
 
         for epoch in range(epochs):
             optimizer.zero_grad()
             perm = torch.randperm(X_train.size(0))
-            X_train = X_train[perm]
-            y_train = y_train[perm]
-            X_train = X_train[:64]
-            y_train = y_train[:64]
+            X_train = X_train[perm][:64]
+            y_train = y_train[perm][:64]
 
-            pred_y = self.model.forward(X_train)
+            pred_y = self.forward(X_train)
 
-
-            self.loss(y_train,pred_y).backward()
+            loss = self.loss(y_train, pred_y, dt=dt)
+            loss.backward()
 
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-
             optimizer.step()
 
-            # Optional symplecticity enforcement
             if epoch % 100 == 0:
-                print(f"Epoch {epoch}, Loss: {mse_loss:.12f}")
+                print(f"Epoch {epoch}, Loss: {loss.item():.12f}")
 
         return self.model
 
     def predict(self, x, steps):
-        """
-        Predict a trajectory for multiple steps ahead
-        
-        Args:
-            x: Initial state tensor of shape (1, 4)
-            steps: Number of steps to predict
-            
-        Returns:
-            Trajectory tensor of shape (steps+1, 4)
-        """
         trajectory = [x]
         current_x = x
-        
         for _ in range(steps):
             current_x = self.forward(current_x)
             trajectory.append(current_x)
-            
         return torch.cat(trajectory, dim=0)
+
 
 
 # Evaluation function with proper plotting
