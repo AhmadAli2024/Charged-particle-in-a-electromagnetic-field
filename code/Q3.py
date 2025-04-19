@@ -100,7 +100,7 @@ class PINNS(nn.Module):
 
 # Evaluation function with proper plotting
 def evaluate_and_plot(model, X_test, steps=300):
-    model.eval()
+    #model.eval()
     
     # Get initial point for trajectory prediction
     initial_state = X_test[0:1].clone().detach().requires_grad_(True).to(device)
@@ -214,9 +214,9 @@ if __name__ == "__main__":
     pinn = PINNS(hidden_dim=128).to(device)
 
     # Hyperparameters
-    epochs = 500  # Increased from 100
+    epochs = 20000  # Increased from 100
     batch_size = 64
-    learning_rate = 0.1
+    learning_rate = 0.001
     dt = 0.1  # timestep for IRK
 
     # Optimizer
@@ -225,7 +225,7 @@ if __name__ == "__main__":
     # Training loop
     print("Starting training...")
     training_losses = []
-    pinn = pinn.train_pinn(X_train,y_train)
+    pinn.model = pinn.train_pinn(X_train,y_train,epochs=epochs)
 
 
     print("Training complete!")
@@ -242,9 +242,9 @@ if __name__ == "__main__":
     
     # Evaluate and visualize results
     print("Evaluating model...")
-    avg_mse, predicted_trajectory = evaluate_and_plot(pnn, X_test)
+    avg_mse, predicted_trajectory = evaluate_and_plot(pinn, X_test)
     
     # Save the model
-    torch.save(pnn.state_dict(), 'pinns_model.pth')
+    torch.save(pinn.state_dict(), 'pinns_model.pth')
     
     print("Done!")
