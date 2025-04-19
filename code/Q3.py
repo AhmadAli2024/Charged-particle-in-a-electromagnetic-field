@@ -22,229 +22,155 @@ class PINNS(nn.Module):
             nn.Linear(hidden_dim, 4)
         )
 
-        # 4 learnable parameters
-        self.lambda1 = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
-        self.lambda2 = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
-        self.lambda3 = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
-        self.lambda4 = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
+        # Learnable parameters with positive constraint using softplus
+        self.lambda1 = nn.Parameter(torch.tensor(0.5))
+        self.lambda2 = nn.Parameter(torch.tensor(0.5))
+        self.lambda3 = nn.Parameter(torch.tensor(0.5))
+        self.lambda4 = nn.Parameter(torch.tensor(0.5))
 
-        # Load IRK weights
-        file_path = f'../data/Utilities/IRK_weights/Butcher_IRK{q}.txt'
-        try:
-            tmp = torch.from_numpy(np.loadtxt(file_path, ndmin=2).astype(np.float32))
-            weights = tmp[:q**2 + q].reshape(q + 1, q)
-            self.IRK_alpha = weights[:-1, :].to(device)
-            self.IRK_beta = weights[-1:, :].to(device)
-            self.IRK_times = tmp[q**2 + q:].to(device)
-        except FileNotFoundError:
-            print(f"Warning: IRK weights file not found at {file_path}")
-            print("Initializing with default values")
-            self.IRK_alpha = torch.tensor([[0.25, -0.0625], [0.25, 0.25]]).to(device)
-            self.IRK_beta = torch.tensor([[0.5, 0.5]]).to(device)
-            self.IRK_times = torch.tensor([0.5 - np.sqrt(3)/6, 0.5 + np.sqrt(3)/6]).to(device)
+    def forward(self, X):
+        return self.model(X)
 
-    def forward(self, X0, dt=0.1):
-        return self.model(X0)
+    def loss(self, X, y, pred, dt=0.1):
+        # Current state (t)
+        v_current = X[:, :2]
+        x_current = X[:, 2:]
+        
+        # Next state (t+dt) - ground truth
+        v_next_true = y[:, :2]
+        x_next_true = y[:, 2:]
+        
+        # Predicted next state (t+dt)
+        v_next_pred = pred[:, :2]
+        x_next_pred = pred[:, 2:]
+        
+        # Compute Coulomb force using current position
+        x_norm = torch.norm(x_current, dim=1, keepdim=True) + 1e-8
+        coulomb_term = x_current / (x_norm**3)
+        
+        # Compute derivatives using current and next state
+        dvdt = (v_next_pred - v_current) / dt
+        dxdt = (x_next_pred - x_current) / dt
+        
+        # Physics residuals
+        Rv = coulomb_term - dvdt  # F = ma residual
+        Rx = v_current - dxdt     # dx/dt = v residual
+        
+        # Loss components with softplus to ensure positivity
+        lambda1 = F.softplus(self.lambda1)
+        lambda2 = F.softplus(self.lambda2)
+        lambda3 = F.softplus(self.lambda3)
+        lambda4 = F.softplus(self.lambda4)
+        
+        physics_loss = lambda1 * torch.mean(Rv**2) + lambda2 * torch.mean(Rx**2)
+        data_loss = lambda3 * F.mse_loss(v_next_pred, v_next_true) + lambda4 * F.mse_loss(x_next_pred, x_next_true)
+        
+        total_loss = physics_loss + data_loss
+        return total_loss
 
-    def loss(self, true, pred, dt=0.1):
-        v_true = true[:, :2]
-        x_true = true[:, 2:]
-        v_pred = pred[:, :2]
-        x_pred = pred[:, 2:]
-
-        x_norm = torch.norm(x_true, dim=1, keepdim=True)
-        coulomb_term = x_true / (100 * x_norm**3 + 1e-8)
-
-        dvdt = (v_pred - v_true) / dt
-        dxdt = (x_pred - x_true) / dt
-
-        Rv = coulomb_term - dvdt
-        Rx = v_true - dxdt
-
-        Rl = self.lambda1 * torch.mean(Rv**2) + self.lambda2 * torch.mean(Rx**2)
-        L = self.lambda3 * F.mse_loss(v_pred, v_true) + self.lambda4 * F.mse_loss(x_pred, x_true)
-
-        return Rl + L
-
-    def train_pinn(self, X_train, y_train, epochs=100, lr=0.001, dt=0.1):
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
-
+    def train_pinn(self, X_train, y_train, epochs=10000, lr=0.001, dt=0.1, batch_size=64):
+        optimizer = torch.optim.Adam(self.parameters(), lr=lr)
+        training_losses = []
+        
+        dataset = TensorDataset(X_train, y_train)
+        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        
         for epoch in range(epochs):
-            optimizer.zero_grad()
-            perm = torch.randperm(X_train.size(0))
-            X_train = X_train[perm][:64]
-            y_train = y_train[perm][:64]
-
-            pred_y = self.forward(X_train)
-
-            loss = self.loss(y_train, pred_y, dt=dt)
-            loss.backward()
-
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            optimizer.step()
-
+            epoch_loss = 0.0
+            for batch_X, batch_y in loader:
+                optimizer.zero_grad()
+                pred_y = self.forward(batch_X)
+                loss = self.loss(batch_X, batch_y, pred_y, dt=dt)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+                optimizer.step()
+                epoch_loss += loss.item()
+            
+            epoch_loss /= len(loader)
+            training_losses.append(epoch_loss)
+            
             if epoch % 100 == 0:
-                print(f"Epoch {epoch}, Loss: {loss.item():.12f}")
+                print(f"Epoch {epoch}, Loss: {epoch_loss:.6f}")
+        
+        return training_losses
 
-        return self.model
-
-    def predict(self, x, steps):
-        trajectory = [x]
-        current_x = x
+    def predict(self, x0, steps, dt=0.1):
+        trajectory = [x0]
+        current_state = x0.clone()
         for _ in range(steps):
-            current_x = self.forward(current_x)
-            trajectory.append(current_x)
-        return torch.cat(trajectory, dim=0)
+            next_state = self.forward(current_state)
+            trajectory.append(next_state)
+            current_state = next_state.detach()  # Detach to prevent gradient accumulation
+        return torch.stack(trajectory)
 
-
-
-# Evaluation function with proper plotting
 def evaluate_and_plot(model, X_test, steps=300):
-    #model.eval()
+    initial_state = X_test[0:1].to(device)
     
-    # Get initial point for trajectory prediction
-    initial_state = X_test[0:1].clone().detach().requires_grad_(True).to(device)
+    # Generate predictions
+    with torch.no_grad():
+        predicted = model.predict(initial_state, steps)
     
-    # Ground truth trajectory from test data
+    # Ground truth (assuming X_test contains sequential states)
     ground_truth = X_test[:steps+1]
     
-    # Generate multi-step prediction
-    with torch.no_grad():
-        predicted_trajectory = model.predict(initial_state, steps)
-    
-    # Plot position components (assumed to be last two dimensions)
-    plt.figure(figsize=(12, 8))
-    
-    # Ground truth (blue)
-    plt.plot(ground_truth[:, 2].cpu().numpy(), ground_truth[:, 3].cpu().numpy(), 
-             'b-', label='Ground Truth', linewidth=2)
-    
-    # Prediction (red)
-    plt.plot(predicted_trajectory[:, 2].cpu().detach().numpy(), predicted_trajectory[:, 3].cpu().detach().numpy(), 
-             'r--', label='PNN Prediction', linewidth=2)
-    
-    # Highlight start point
-    plt.scatter(ground_truth[0, 2].cpu().numpy(), ground_truth[0, 3].cpu().numpy(), 
-               c='green', s=100, label='Start Point')
-    
-    plt.xlabel('Position x1', fontsize=14)
-    plt.ylabel('Position x2', fontsize=14)
-    plt.title('Charged Particle Trajectory Prediction', fontsize=16)
-    plt.legend(fontsize=12)
-    plt.grid(True)
-    plt.savefig('trajectory_prediction.png')
+    # Plot trajectories
+    plt.figure(figsize=(12, 6))
+    plt.plot(ground_truth[:, 2].cpu(), ground_truth[:, 3].cpu(), 'b-', label='Ground Truth')
+    plt.plot(predicted[:, 0, 2].cpu(), predicted[:, 0, 3].cpu(), 'r--', label='Prediction')
+    plt.scatter(ground_truth[0, 2].cpu(), ground_truth[0, 3].cpu(), c='g', s=100, label='Start')
+    plt.xlabel('x1')
+    plt.ylabel('x2')
+    plt.legend()
+    plt.title('Trajectory Comparison')
+    plt.savefig('trajectory.png')
     plt.show()
     
-    # Calculate and plot MSE over time
-    mse_over_time = []
-    for t in range(min(len(ground_truth), len(predicted_trajectory))):
-        mse = F.mse_loss(predicted_trajectory[t:t+1], ground_truth[t:t+1]).item()
-        mse_over_time.append(mse)
-    
-    plt.figure(figsize=(10, 6))
-    plt.semilogy(mse_over_time)
-    plt.xlabel('Time Step', fontsize=14)
-    plt.ylabel('Log MSE', fontsize=14)
-    plt.title('Prediction Error Over Time', fontsize=16)
-    plt.grid(True)
-    plt.savefig('prediction_error.png')
-    plt.show()
-    
-    # Calculate average MSE
-    avg_mse = sum(mse_over_time) / len(mse_over_time)
-    print(f"Average MSE over {len(mse_over_time)} time steps: {avg_mse:.6f}")
-    
-    return avg_mse, predicted_trajectory
+    # Calculate MSE
+    mse = F.mse_loss(predicted[:len(ground_truth), 0], ground_truth).item()
+    print(f"Trajectory MSE: {mse:.4e}")
+    return mse
 
 if __name__ == "__main__":
-    # Load training data
+    # Load data
     try:
-        with open('../data/train.txt', 'r') as f:
-            data = [list(map(float, line.strip().split())) for line in f if line.strip()]
-        tensor_data = torch.tensor(data, dtype=torch.float32).T
-        train_p = tensor_data[:2, :1200].T  # momentum (p1, p2)
-        train_q = tensor_data[2:, :1200].T  # position (q1, q2)
-        target_p = tensor_data[:2, 1:1201].T
-        target_q = tensor_data[2:, 1:1201].T
-
-        # Load testing data
-        with open('../data/test.txt', 'r') as f:
-            data = [list(map(float, line.strip().split())) for line in f if line.strip()]
-        tensor_data = torch.tensor(data, dtype=torch.float32).T
-        test_p = tensor_data[:2, :].T
-        test_q = tensor_data[2:, :].T
-
-        # Create training and target tensors
-        X_train = torch.cat([train_p, train_q], dim=1)
-        y_train = torch.cat([target_p, target_q], dim=1)
-
-        # Create test tensors
-        X_test = torch.cat([test_p, test_q], dim=1)
-        y_test = X_test[1:].clone()  # The target is the next state in the sequence
+        train_data = np.loadtxt('../data/train.txt')
+        test_data = np.loadtxt('../data/test.txt')
+        
+        # Convert to PyTorch tensors
+        X_train = torch.tensor(train_data[:-1], dtype=torch.float32)
+        y_train = torch.tensor(train_data[1:], dtype=torch.float32)
+        X_test = torch.tensor(test_data, dtype=torch.float32)
         
     except FileNotFoundError:
-        print("Warning: Data files not found. Creating synthetic data for testing.")
-        # Create synthetic data for testing if files are not found
-        # Simple harmonic oscillator
-        t = torch.linspace(0, 30, 3000)
-        p = torch.sin(t).unsqueeze(1)
-        q = torch.cos(t).unsqueeze(1)
-        
-        # Create 2D version
-        p2 = torch.sin(t + 0.5).unsqueeze(1)
-        q2 = torch.cos(t + 0.5).unsqueeze(1)
-        
-        # Combine into training and test data
-        X_full = torch.cat([p, p2, q, q2], dim=1)
-        
-        # Split into train and test
-        X_train = X_full[:2000]
-        y_train = X_full[1:2001]
-        X_test = X_full[2000:]
+        print("Generating synthetic data...")
+        t = torch.linspace(0, 20, 2000)
+        x = torch.stack([
+            torch.sin(t) + 0.1*torch.randn(len(t)),
+            torch.cos(t) + 0.1*torch.randn(len(t)),
+            torch.sin(t) * 0.5,
+            torch.cos(t) * 0.5
+        ], dim=1)
+        X_train = x[:-1000]
+        y_train = x[1:-999]
+        X_test = x[-1000:]
     
     # Move data to device
-    X_train = X_train.to(device)
-    y_train = y_train.to(device)
+    X_train, y_train = X_train.to(device), y_train.to(device)
     X_test = X_test.to(device)
 
-    # Set random seed for reproducibility
-    torch.manual_seed(42)
-    
-    # Initialize PNN model
+    # Initialize and train model
     pinn = PINNS(hidden_dim=128).to(device)
-
-    # Hyperparameters
-    epochs = 20000  # Increased from 100
-    batch_size = 64
-    learning_rate = 0.001
-    dt = 0.1  # timestep for IRK
-
-    # Optimizer
-    optimizer = torch.optim.Adam(pinn.parameters(), lr=learning_rate)
-
-    # Training loop
-    print("Starting training...")
-    training_losses = []
-    pinn.model = pinn.train_pinn(X_train,y_train,epochs=epochs)
-
-
-    print("Training complete!")
+    losses = pinn.train_pinn(X_train, y_train, epochs=10000, lr=0.001)
     
     # Plot training loss
-    plt.figure(figsize=(10, 6))
-    plt.semilogy(training_losses)
-    plt.xlabel('Epoch', fontsize=14)
-    plt.ylabel('Log Loss', fontsize=14)
-    plt.title('Training Loss', fontsize=16)
-    plt.grid(True)
+    plt.semilogy(losses)
+    plt.title('Training Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Log Loss')
     plt.savefig('training_loss.png')
     plt.show()
     
-    # Evaluate and visualize results
-    print("Evaluating model...")
-    avg_mse, predicted_trajectory = evaluate_and_plot(pinn, X_test)
-    
-    # Save the model
-    torch.save(pinn.state_dict(), 'pinns_model.pth')
-    
-    print("Done!")
+    # Evaluate
+    test_mse = evaluate_and_plot(pinn, X_test)
+    torch.save(pinn.state_dict(), 'charged_particle_pinn.pth')
+    print(f"Test MSE: {test_mse:.4e}")
