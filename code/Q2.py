@@ -30,7 +30,7 @@ class NICECouplingLayer(nn.Module):
         return torch.cat([x1, x2], dim=1)
 
 class ExtendedSympNet(nn.Module):
-    def __init__(self, latent_dim, active_dim=4, hidden_dim=128):
+    def __init__(self, latent_dim, active_dim=4, hidden_dim=256):
         super().__init__()
         self.active_dim = active_dim
         self.latent_dim = latent_dim
@@ -40,16 +40,20 @@ class ExtendedSympNet(nn.Module):
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
             nn.Linear(hidden_dim, 1)
         )
-
-        self.dt_q = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
-        self.dt_p = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
 
         self.S = nn.Parameter(torch.zeros(self.active_dim, self.active_dim))
         torch.nn.init.normal_(self.S, 0, 0.1)
 
-        self.alpha = nn.Parameter(torch.tensor(0.001))
+        self.dt_q = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
+        self.dt_p = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
+
+        self.alpha = nn.Parameter(torch.tensor(0.01))
 
     def forward(self, z, dt=0.1):
         z_active = z[:, :self.active_dim]  # z1, z2
@@ -92,7 +96,7 @@ class ExtendedSympNet(nn.Module):
 class PNN(nn.Module):
     def __init__(self):
         super().__init__()
-        self.transformer = NICECouplingLayer(4, 128)
+        self.transformer = NICECouplingLayer(4, 125)
         self.sympNet = ExtendedSympNet(4)
 
     def forward(self, x):
@@ -242,7 +246,7 @@ if __name__ == "__main__":
     
     # Train the model
     print("Starting training...")
-    pnn = train_pnn(pnn, X_train, y_train, epochs=10000, lr=0.001)
+    pnn = train_pnn(pnn, X_train, y_train, epochs=100000, lr=0.0005)
     print("Training complete!")
     
     # Evaluate and visualize results

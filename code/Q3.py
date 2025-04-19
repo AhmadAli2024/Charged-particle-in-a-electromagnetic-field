@@ -13,7 +13,7 @@ class PINNS(nn.Module):
         super().__init__()
 
         # Deeper neural network with more hidden layers
-        self.H_net = nn.Sequential(
+        self.model = nn.Sequential(
             nn.Linear(4, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -47,117 +47,41 @@ class PINNS(nn.Module):
             self.IRK_beta = torch.tensor([[0.5, 0.5]]).to(device)
             self.IRK_times = torch.tensor([0.5 - np.sqrt(3)/6, 0.5 + np.sqrt(3)/6]).to(device)
 
-    def hamiltonian_vector_field(self, x):
-        """
-        Compute the Hamiltonian vector field.
-        For a Hamiltonian system: dx/dt = J ∇H(x)
-        where J is the symplectic matrix and H is the Hamiltonian function.
-        
-        Args:
-            x: Input tensor of shape (batch_size, 4) representing [p1, p2, q1, q2]
-        
-        Returns:
-            Vector field of shape (batch_size, 4)
-        """
-        # Split input into momentum (p) and position (q)
-        p = x[:, :2]  # (p1, p2)
-        q = x[:, 2:]  # (q1, q2)
-        
-        # Apply the H_net to get the output
-        H_out = self.H_net(x)
-        
-        # Apply the symplectic structure
-        # For a Hamiltonian system with p = (p1, p2) and q = (q1, q2):
-        # dp/dt = -∂H/∂q
-        # dq/dt = ∂H/∂p
-        
-        # Scale the outputs using the learnable parameters
-        dp_dt = -self.lambda1 * H_out[:, 2:] - self.lambda2 * q
-        dq_dt = self.lambda3 * H_out[:, :2] + self.lambda4 * p
-        
-        # Combine to form the vector field
-        vector_field = torch.cat([dp_dt, dq_dt], dim=1)
-        
-        return vector_field
-
     def forward(self, X0, dt=0.1):
-        """
-        Perform one time step using the IRK method
-        
-        Args:
-            X0: Initial state tensor of shape (batch_size, 4)
-            dt: Time step size
-            
-        Returns:
-            X1: Next state tensor of shape (batch_size, 4)
-        """
-        batch_size = X0.shape[0]
-        q = self.IRK_alpha.shape[0]  # Number of stages in IRK method
-        
-        # Initialize stage vectors (K values in IRK method)
-        K = torch.zeros(batch_size, q, 4, device=X0.device)
-        
-        # Fixed-point iteration to solve for the stages
-        for _ in range(10):  # Usually 5-10 iterations are sufficient
-            # Current estimate of stage points
-            X_stages = X0.unsqueeze(1) + dt * torch.einsum('bqi,ij->bqj', K, self.IRK_alpha)
-            
-            # Compute vector field at stage points
-            X_stages_flat = X_stages.reshape(-1, 4)
-            vector_field = self.hamiltonian_vector_field(X_stages_flat).reshape(batch_size, q, 4)
-            
-            # Update stages
-            K = vector_field
-            
-        # Compute final step using the converged stages
-        X1 = X0 + dt * torch.einsum('bqi,ij->bj', K, self.IRK_beta)
-        
-        return X1
+        return self.model(X0)
 
-    def compute_residual_loss(self, X0, X1, dt):
-        """
-        Compute the physics-informed residual loss
-        
-        Args:
-            X0: Initial state tensor of shape (batch_size, 4)
-            X1: Target state tensor of shape (batch_size, 4)
-            dt: Time step size
-            
-        Returns:
-            Loss value
-        """
-        # Predict the next state
-        X1_pred = self.forward(X0, dt)
-        
-        # Data loss - how well our prediction matches the target
-        data_loss = F.mse_loss(X1_pred, X1)
-        
-        # Physics loss - conservation of Hamiltonian (energy)
-        # In a perfect Hamiltonian system, energy should be conserved
-        batch_size = X0.shape[0]
-        q = self.IRK_alpha.shape[0]
-        
-        # Compute stages and their vector fields
-        K = torch.zeros(batch_size, q, 4, device=X0.device)
-        
-        # One iteration to get rough estimates of the stages
-        X_stages = X0.unsqueeze(1) + dt * torch.einsum('bqi,ij->bqj', K, self.IRK_alpha)
-        X_stages_flat = X_stages.reshape(-1, 4)
-        
-        # Compute vector field and reshape
-        vector_field = self.hamiltonian_vector_field(X_stages_flat).reshape(batch_size, q, 4)
-        
-        # The residual is how well the stages satisfy the IRK equations
-        stage_sum = torch.einsum('bqi,ij->bqj', vector_field, self.IRK_alpha)
-        X_stages_new = X0.unsqueeze(1) + dt * stage_sum
-        
-        # Physics-based residual
-        physics_loss = F.mse_loss(X_stages_new, X_stages)
-        
-        # Total loss is a weighted sum of data and physics losses
-        total_loss = data_loss + 0.1 * physics_loss
-        
-        return total_loss
+    def loss(self, true, pred, dt=0.1):
+        Rv = true/(100*(true.pow(2).sum(dim=2)).pow(3/2,dim=1)) - (pred[:2]*dt)
+        Rx = true[:2]-(pred[2:]*dt)
+        Rl = lambda1*Rv + lambda2*Rx
+        L = lambda3*((pred[:2]-true[:2]).pow(2,dim=1)) + lambda4((pred[2:]-true[2:]).pow(2,dim=1))
+        return Rl+L
+
+    def train_pinn(self, X_train, y_train, epochs=100, lr=0.001):
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+
+        for epoch in range(epochs):
+            optimizer.zero_grad()
+            perm = torch.randperm(X_train.size(0))
+            X_train = X_train[perm]
+            y_train = y_train[perm]
+            X_train = X_train[:64]
+            y_train = y_train[:64]
+
+            pred_y = self.model.forward(X_train)
+
+
+            self.loss(y_train,pred_y).backward()
+
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+
+            optimizer.step()
+
+            # Optional symplecticity enforcement
+            if epoch % 100 == 0:
+                print(f"Epoch {epoch}, Loss: {mse_loss:.12f}")
+
+        return self.model
 
     def predict(self, x, steps):
         """
@@ -293,56 +217,22 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     
     # Initialize PNN model
-    pnn = PINNS(hidden_dim=128).to(device)
+    pinn = PINNS(hidden_dim=128).to(device)
 
     # Hyperparameters
     epochs = 500  # Increased from 100
     batch_size = 64
-    learning_rate = 1e-3
+    learning_rate = 0.1
     dt = 0.1  # timestep for IRK
 
-    # DataLoader
-    train_dataset = TensorDataset(X_train, y_train)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
     # Optimizer
-    optimizer = torch.optim.Adam(pnn.parameters(), lr=learning_rate)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=10, factor=0.5, verbose=True)
+    optimizer = torch.optim.Adam(pinn.parameters(), lr=learning_rate)
 
     # Training loop
     print("Starting training...")
     training_losses = []
+    pinn = pinn.train_pinn(X_train,y_train)
 
-    for epoch in range(1, epochs + 1):
-        pnn.train()
-        total_loss = 0.0
-
-        for batch_idx, (X0, X1) in enumerate(train_loader):
-            X0, X1 = X0.to(device), X1.to(device)
-
-            optimizer.zero_grad()
-            loss = pnn.compute_residual_loss(X0, X1, dt)
-            loss.backward()
-            
-            # Gradient clipping to prevent exploding gradients
-            torch.nn.utils.clip_grad_norm_(pnn.parameters(), max_norm=1.0)
-            
-            optimizer.step()
-            total_loss += loss.item()
-
-        avg_loss = total_loss / len(train_loader)
-        training_losses.append(avg_loss)
-        
-        # Learning rate scheduling
-        scheduler.step(avg_loss)
-        
-        if epoch % 10 == 0:
-            print(f"[Epoch {epoch}/{epochs}] Loss: {avg_loss:.6f} | λ1={pnn.lambda1.item():.3f} λ2={pnn.lambda2.item():.3f} λ3={pnn.lambda3.item():.3f} λ4={pnn.lambda4.item():.3f}")
-            
-        # Early stopping check
-        if epoch > 50 and avg_loss < 1e-6:
-            print(f"Converged at epoch {epoch} with loss {avg_loss:.6f}")
-            break
 
     print("Training complete!")
     
