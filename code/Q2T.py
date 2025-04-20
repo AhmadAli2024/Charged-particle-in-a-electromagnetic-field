@@ -125,10 +125,7 @@ def train_pnn(model, X_train, y_train, epochs=1000, lr=0.001):
                 pred = model(batch_X)
                 loss = F.mse_loss(pred, batch_y)
                 
-                # Physics regularization
-                S_norm = torch.norm(model.sympNet.S)
-                reg_loss = 1e-4 * S_norm
-                total_loss = loss + reg_loss
+                total_loss = loss
             
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -179,7 +176,7 @@ def evaluate_and_plot(model, X_test, steps=300):
     
     # Energy conservation
     true_energy = (true_traj[:, :2].norm(dim=1) - 1/(true_traj[:, 2:].norm(dim=1)+1e-8)).cpu()
-    pred_energy = (pred_traj[:, 0, :2].norm(dim=1) - 1/(pred_traj[:, 0, 2:].norm(dim=1)+1e-8).cpu()
+    pred_energy = (pred_traj[:, 0, :2].norm(dim=1) - 1/(pred_traj[:, 0, 2:].norm(dim=1)+1e-8)).cpu()
     axs[1,0].plot(true_energy, 'b-', label='True')
     axs[1,0].plot(pred_energy, 'r--', label='Pred')
     axs[1,0].set_title('System Energy')
@@ -201,16 +198,11 @@ if __name__ == "__main__":
     X_train = torch.tensor(data[:-1], dtype=torch.float32)
     y_train = torch.tensor(data[1:], dtype=torch.float32)
     
-    # Normalize data
-    mean, std = X_train.mean(0), X_train.std(0)
-    X_train = (X_train - mean) / (std + 1e-8)
-    y_train = (y_train - mean) / (std + 1e-8)
-    
     model = EnhancedPNN(hidden_dim=256).to(device)
-    model = train_pnn(model, X_train.to(device), y_train.to(device), epochs=2000, lr=3e-4)
+    model = train_pnn(model, X_train.to(device), y_train.to(device), epochs=10000, lr=0.001)
     
     # Load and normalize test data
     test_data = np.loadtxt('../data/test.txt')
-    X_test = (torch.tensor(test_data, dtype=torch.float32) - mean) / (std + 1e-8)
+    X_test = torch.tensor(test_data, dtype=torch.float32)
     avg_error = evaluate_and_plot(model, X_test.to(device))
     print(f"Average prediction error: {avg_error:.4e}")

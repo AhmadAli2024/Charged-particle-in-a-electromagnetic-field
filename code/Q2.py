@@ -30,13 +30,25 @@ class NICECouplingLayer(nn.Module):
         return torch.cat([x1, x2], dim=1)
 
 class ExtendedSympNet(nn.Module):
-    def __init__(self, latent_dim, active_dim=4, hidden_dim=256):
+    def __init__(self, latent_dim, active_dim=4, hidden_dim=64):
         super().__init__()
         self.active_dim = active_dim
         self.latent_dim = latent_dim
 
         self.H_net = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
@@ -114,16 +126,15 @@ class PNN(nn.Module):
         return torch.stack(trajectory).squeeze(1)
 
 
-def train_pnn(model, X_train, y_train, epochs=100, lr=0.001):
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-
+def train_pnn(model, X_train, y_train,test=None, epochs=100, lr=0.001):
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     for epoch in range(epochs):
         optimizer.zero_grad()
-        perm = torch.randperm(X_train.size(0))
-        X_train = X_train[perm]
-        y_train = y_train[perm]
-        X_train = X_train[:64]
-        y_train = y_train[:64]
+        #perm = torch.randperm(X_train.size(0))
+        #X_train = X_train[perm]
+        #y_train = y_train[perm]
+        #X_train = X_train[:64]
+        #y_train = y_train[:64]
 
         pred_y = model.forward(X_train)
 
@@ -139,7 +150,6 @@ def train_pnn(model, X_train, y_train, epochs=100, lr=0.001):
         # Combine them
         mse_loss = loss_p + loss_q
 
-
         mse_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
@@ -150,6 +160,8 @@ def train_pnn(model, X_train, y_train, epochs=100, lr=0.001):
         # Optional symplecticity enforcement
         if epoch % 100 == 0:
             print(f"Epoch {epoch}, Loss: {mse_loss:.12f}")
+            if test != None:
+                evaluate_and_plot(model,test)
 
     return model
 
@@ -168,27 +180,27 @@ def evaluate_and_plot(model, X_test, steps=300):
     predicted_trajectory = model.predict(initial_state, steps)
     
     # Plot position components (assumed to be last two dimensions)
-    plt.figure(figsize=(12, 8))
+    #plt.figure(figsize=(12, 8))
     
     # Ground truth (blue)
-    plt.plot(ground_truth[:, 2].cpu().numpy(), ground_truth[:, 3].cpu().numpy(), 
-             'b-', label='Ground Truth', linewidth=2)
+    #plt.plot(ground_truth[:, 2].cpu().numpy(), ground_truth[:, 3].cpu().numpy(), 
+    #         'b-', label='Ground Truth', linewidth=2)
     
     # Prediction (red)
-    plt.plot(predicted_trajectory[:, 2].cpu().detach().numpy(), predicted_trajectory[:, 3].cpu().detach().numpy(), 
-             'r--', label='PNN Prediction', linewidth=2)
+    #plt.plot(predicted_trajectory[:, 2].cpu().detach().numpy(), predicted_trajectory[:, 3].cpu().detach().numpy(), 
+    #         'r--', label='PNN Prediction', linewidth=2)
     
     # Highlight start point
-    plt.scatter(ground_truth[0, 2].cpu().numpy(), ground_truth[0, 3].cpu().numpy(), 
-               c='green', s=100, label='Start Point')
+    #plt.scatter(ground_truth[0, 2].cpu().numpy(), ground_truth[0, 3].cpu().numpy(), 
+    #           c='green', s=100, label='Start Point')
     
-    plt.xlabel('Position x1', fontsize=14)
-    plt.ylabel('Position x2', fontsize=14)
-    plt.title('Charged Particle Trajectory Prediction', fontsize=16)
-    plt.legend(fontsize=12)
-    plt.grid(True)
-    plt.savefig('hello.png')
-    plt.show()
+    #plt.xlabel('Position x1', fontsize=14)
+    #plt.ylabel('Position x2', fontsize=14)
+    #plt.title('Charged Particle Trajectory Prediction', fontsize=16)
+    #plt.legend(fontsize=12)
+    #plt.grid(True)
+    #plt.savefig('hello.png')
+    #plt.show()
     
     # Calculate and plot MSE over time
     mse_over_time = []
@@ -196,17 +208,19 @@ def evaluate_and_plot(model, X_test, steps=300):
         mse = F.mse_loss(predicted_trajectory[t], ground_truth[t]).item()
         mse_over_time.append(mse)
     
-    plt.figure(figsize=(10, 6))
-    plt.semilogy(mse_over_time)
-    plt.xlabel('Time Step', fontsize=14)
-    plt.ylabel('Log MSE', fontsize=14)
-    plt.title('Prediction Error Over Time', fontsize=16)
-    plt.grid(True)
-    plt.savefig('prediction_error.png')
+    #plt.figure(figsize=(10, 6))
+    #plt.semilogy(mse_over_time)
+    #plt.xlabel('Time Step', fontsize=14)
+    #plt.ylabel('Log MSE', fontsize=14)
+    #plt.title('Prediction Error Over Time', fontsize=16)
+    #plt.grid(True)
+    #plt.savefig('prediction_error.png')
     
     # Calculate average MSE
     avg_mse = sum(mse_over_time) / len(mse_over_time)
     print(f"Average MSE over {len(mse_over_time)} time steps: {avg_mse:.6f}")
+
+    model.train()
     
     return avg_mse, predicted_trajectory
 
@@ -246,7 +260,7 @@ if __name__ == "__main__":
     
     # Train the model
     print("Starting training...")
-    pnn = train_pnn(pnn, X_train, y_train, epochs=100000, lr=0.0005)
+    pnn = train_pnn(pnn, X_train, y_train,test = X_test, epochs=100000, lr=0.000005)
     print("Training complete!")
     
     # Evaluate and visualize results
