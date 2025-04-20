@@ -110,6 +110,7 @@ class PNN(nn.Module):
         super().__init__()
         self.transformer = NICECouplingLayer(4, 125)
         self.sympNet = ExtendedSympNet(4)
+        self.lowestLoss = 100000000.0
 
     def forward(self, x):
         theta = self.transformer.forward(x)
@@ -154,7 +155,7 @@ def train_pnn(model, X_train, y_train,test=None, epochs=100, lr=0.001):
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
         optimizer.step()
-        if epochs % 100:
+        if epochs % 100 == 0:
             model.sympNet.enforce_symplecticity()
 
         # Optional symplecticity enforcement
@@ -180,27 +181,27 @@ def evaluate_and_plot(model, X_test, steps=300):
     predicted_trajectory = model.predict(initial_state, steps)
     
     # Plot position components (assumed to be last two dimensions)
-    #plt.figure(figsize=(12, 8))
+    plt.figure(figsize=(12, 8))
     
     # Ground truth (blue)
-    #plt.plot(ground_truth[:, 2].cpu().numpy(), ground_truth[:, 3].cpu().numpy(), 
-    #         'b-', label='Ground Truth', linewidth=2)
+    plt.plot(ground_truth[:, 2].cpu().numpy(), ground_truth[:, 3].cpu().numpy(), 
+             'b-', label='Ground Truth', linewidth=2)
     
     # Prediction (red)
-    #plt.plot(predicted_trajectory[:, 2].cpu().detach().numpy(), predicted_trajectory[:, 3].cpu().detach().numpy(), 
-    #         'r--', label='PNN Prediction', linewidth=2)
+    plt.plot(predicted_trajectory[:, 2].cpu().detach().numpy(), predicted_trajectory[:, 3].cpu().detach().numpy(), 
+             'r--', label='PNN Prediction', linewidth=2)
     
     # Highlight start point
-    #plt.scatter(ground_truth[0, 2].cpu().numpy(), ground_truth[0, 3].cpu().numpy(), 
-    #           c='green', s=100, label='Start Point')
+    plt.scatter(ground_truth[0, 2].cpu().numpy(), ground_truth[0, 3].cpu().numpy(), 
+               c='green', s=100, label='Start Point')
     
-    #plt.xlabel('Position x1', fontsize=14)
-    #plt.ylabel('Position x2', fontsize=14)
-    #plt.title('Charged Particle Trajectory Prediction', fontsize=16)
-    #plt.legend(fontsize=12)
-    #plt.grid(True)
-    #plt.savefig('hello.png')
-    #plt.show()
+    plt.xlabel('Position x1', fontsize=14)
+    plt.ylabel('Position x2', fontsize=14)
+    plt.title('Charged Particle Trajectory Prediction', fontsize=16)
+    plt.legend(fontsize=12)
+    plt.grid(True)
+    plt.savefig('hello.png')
+    plt.show()
     
     # Calculate and plot MSE over time
     mse_over_time = []
@@ -221,6 +222,11 @@ def evaluate_and_plot(model, X_test, steps=300):
     print(f"Average MSE over {len(mse_over_time)} time steps: {avg_mse:.6f}")
 
     model.train()
+
+    if model.lowestLoss > avg_mse:
+        model.lowestLoss = avg_mse
+        torch.save(pnn.state_dict(), 'Q2Model.pt')
+        print("saved")
     
     return avg_mse, predicted_trajectory
 
@@ -257,10 +263,12 @@ if __name__ == "__main__":
     # Initialize PNN model
     pnn = PNN().to(device)
     
+    pnn.load_state_dict(torch.load('Q2Model.pt'))
+    pnn.eval()  # important for inference
     
     # Train the model
     print("Starting training...")
-    pnn = train_pnn(pnn, X_train, y_train,test = X_test, epochs=100000, lr=0.000005)
+    #pnn = train_pnn(pnn, X_train, y_train,test = X_test, epochs=200000, lr=0.0001)
     print("Training complete!")
     
     # Evaluate and visualize results
