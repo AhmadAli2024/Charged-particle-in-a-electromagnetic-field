@@ -13,6 +13,8 @@ class NICECouplingLayer(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(dim // 2, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, dim // 2)
         )
@@ -30,7 +32,7 @@ class NICECouplingLayer(nn.Module):
         return torch.cat([x1, x2], dim=1)
 
 class ExtendedSympNet(nn.Module):
-    def __init__(self, latent_dim, active_dim=4, hidden_dim=64,dropout=0.1):
+    def __init__(self, latent_dim, active_dim=4, hidden_dim=64,dropout=0.3):
         super().__init__()
         self.active_dim = active_dim
         self.latent_dim = latent_dim
@@ -63,21 +65,20 @@ class ExtendedSympNet(nn.Module):
         self.alpha = nn.Parameter(torch.tensor(0.0001))
 
     def forward(self, z, dt=0.1):
+        # Ensure we maintain the computation graph
+        z = z.clone().requires_grad_(True)
         z_active = z[:, :self.active_dim]  # z1, z2
         z_aux = z[:, self.active_dim:]     # auxiliary vars
 
-        z1 = z_active[:, :2]
-        z2 = z_active[:, 2:]
-
-        z1.requires_grad_(True)
-        z2.requires_grad_(True)
+        z1 = z_active[:, :2].requires_grad_(True)
+        z2 = z_active[:, 2:].requires_grad_(True)
 
         z_combined = torch.cat([z1, z2, z_aux], dim=1)
         H = self.H_net(z_combined).sum()
 
         # Compute partial derivatives ∂H/∂z1 and ∂H/∂z2
-        dHdz1 = torch.autograd.grad(H, z1, create_graph=True)[0]
-        dHdz2 = torch.autograd.grad(H, z2, create_graph=True)[0]
+        dHdz1 = torch.autograd.grad(H, z1, retain_graph=True, create_graph=True)[0]
+        dHdz2 = torch.autograd.grad(H, z2, retain_graph=True, create_graph=True)[0]
 
         # Enforce skew-symmetric structure on S
         S = self.S - self.S.t()
@@ -92,7 +93,6 @@ class ExtendedSympNet(nn.Module):
 
 
 
-
     def enforce_symplecticity(self):
         with torch.no_grad():
             self.S.data = 0.5 * (self.S - self.S.t())
@@ -102,10 +102,10 @@ class ExtendedSympNet(nn.Module):
 
 
 class PNN(nn.Module):
-    def __init__(self,dropout=0.1):
+    def __init__(self,dropout=0.3):
         super().__init__()
         self.transformer = NICECouplingLayer(4, 125)
-        self.sympNet = ExtendedSympNet(4,dropout=0.1)
+        self.sympNet = ExtendedSympNet(4,dropout=0.3)
         self.lowestLoss = 1e20
 
     def forward(self, x):
@@ -115,57 +115,60 @@ class PNN(nn.Module):
         return thetaI
 
     def predict(self, x, steps):
-        trajectory = [x]
+        trajectory = [x.detach().cpu()]
+        x = x.clone().requires_grad_(True)
+        
         for _ in range(steps):
-            x = x.clone().detach().requires_grad_(True)
-            x = self.forward(x)
-            trajectory.append(x)
+            with torch.set_grad_enabled(True):
+                x = self.forward(x)
+                trajectory.append(x.detach().cpu())
+        
         return torch.stack(trajectory).squeeze(1)
 
-
-def train_pnn(model, X_train, y_train,test=None, epochs=100, lr=0.0001):
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
-    with open("./loss.txt",'w') as loss_file:
-        for epoch in range(epochs):
-            perm = torch.randperm(X_train.size(0))
-            X_train = X_train[perm]
-            y_train = y_train[perm]
-            X_train = X_train[:200]
-            y_train = y_train[:200]
-
+def train_pnn(model, X_train, y_train, test=None, epochs=100, lr=0.0001):
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=500, factor=0.5)
+    
+    best_test_mse = float('inf')
+    
+    for epoch in range(epochs):
+        # Use all data with batching instead of sampling
+        batch_size = 256
+        for i in range(0, len(X_train), batch_size):
+            X_batch = X_train[i:i+batch_size]
+            y_batch = y_train[i:i+batch_size]
+            
             optimizer.zero_grad()
-
-            pred_y = model.forward(X_train)
-
-            # pred_y and y_train shape: [batch_size, 4]
-            # Split into momentum and position
+            pred_y = model.forward(X_batch)
+            
             pred_p, pred_q = pred_y[:, :2], pred_y[:, 2:]
-            true_p, true_q = y_train[:, :2], y_train[:, 2:]
-
-            # Compute separate MSE losses
+            true_p, true_q = y_batch[:, :2], y_batch[:, 2:]
+            
             loss_p = F.mse_loss(pred_p, true_p)
             loss_q = F.mse_loss(pred_q, true_q)
-
-            # Combine them
             mse_loss = loss_p + loss_q
-
+            
             mse_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-
             optimizer.step()
-            if epochs % 100 == 0:
-                model.sympNet.enforce_symplecticity()
-
-            # Optional symplecticity enforcement
-            if epoch % 100 == 0:
-                loss_file.write(f"{epoch},{mse_loss.item()}\n")
-                print(f"Epoch {epoch}, Loss: {mse_loss:.12f}")
-                if test != None:
-                    evaluate_and_plot(model,test)
-
+        
+        # Enforce symplecticity more frequently
+        if epoch % 10 == 0:
+            model.sympNet.enforce_symplecticity()
+        
+        # Evaluation
+        if epoch % 50 == 0 or epoch < 1000 and epoch % 10 == 0:
+            with torch.no_grad():
+                test_mse, _ = evaluate_and_plot(model, test)
+                scheduler.step(test_mse)
+                
+                if test_mse < best_test_mse:
+                    best_test_mse = test_mse
+                    torch.save(model.state_dict(), 'best_model.pt')
+                    
+                print(f"Epoch {epoch}, Train Loss: {mse_loss.item():.6f}, Test MSE: {test_mse:.6f}, Best: {best_test_mse:.6f}")
+    
     return model
-
 
 
 # Evaluation function with proper plotting
