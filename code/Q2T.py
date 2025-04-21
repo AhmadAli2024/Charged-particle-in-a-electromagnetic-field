@@ -53,7 +53,7 @@ class ExtendedSympNet(nn.Module):
         z = z.clone().requires_grad_(True)
         z_active = z[:, :self.active_dim]
         
-        # Split into components that need gradients
+        # Split components with gradient tracking
         z1 = z_active[:, :2].requires_grad_(True)
         z2 = z_active[:, 2:].requires_grad_(True)
         z_aux = z[:, self.active_dim:]
@@ -62,7 +62,7 @@ class ExtendedSympNet(nn.Module):
         z_combined = torch.cat([z1, z2, z_aux], dim=1)
         H = self.H_net(z_combined).sum()
 
-        # Calculate gradients properly
+        # Calculate gradients
         dHdz1 = torch.autograd.grad(H, z1, retain_graph=True, create_graph=True)[0]
         dHdz2 = torch.autograd.grad(H, z2, retain_graph=True, create_graph=True)[0]
 
@@ -88,7 +88,6 @@ class PNN(nn.Module):
         self.lowestLoss = float('inf')
 
     def forward(self, x):
-        # Maintain gradient flow through the entire network
         x = x.clone().requires_grad_(True)
         theta = self.transformer(x)
         phi = self.sympNet(theta)
@@ -96,13 +95,36 @@ class PNN(nn.Module):
 
     def predict(self, x, steps):
         trajectory = [x.detach()]
-        current = x.clone().requires_grad_(True)
+        current = x.clone()
         
-        with torch.set_grad_enabled(False):  # Disable grad during prediction
-            for _ in range(steps):
-                current = self.forward(current).detach()
-                trajectory.append(current)
+        for _ in range(steps):
+            with torch.enable_grad():  # Enable gradients temporarily
+                current = current.requires_grad_(True)
+                next_step = self.forward(current)
+            trajectory.append(next_step.detach())
+            current = next_step.detach()
+            
         return torch.stack(trajectory)
+
+def load_data():
+    # Load training data
+    with open('../data/train.txt', 'r') as f:
+        train_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
+    
+    # Load testing data
+    with open('../data/test.txt', 'r') as f:
+        test_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
+
+    # Process data
+    train_data = torch.tensor(train_lines[:1200], dtype=torch.float32)
+    test_data = torch.tensor(test_lines, dtype=torch.float32)
+
+    # Create training pairs
+    X_train = train_data.to(device)
+    y_train = torch.tensor(train_lines[1:1201], dtype=torch.float32).to(device)
+    X_test = test_data.to(device)
+
+    return X_train, y_train, X_test
 
 def train(model, X_train, y_train, X_test, epochs=200000, lr=1e-4):
     model = model.to(device)
@@ -115,7 +137,10 @@ def train(model, X_train, y_train, X_test, epochs=200000, lr=1e-4):
         model.train()
         epoch_loss = 0
         
-        # Training loop
+        # Shuffle data
+        perm = torch.randperm(len(X_train))
+        X_train, y_train = X_train[perm], y_train[perm]
+        
         for i in range(0, len(X_train), batch_size):
             X_batch = X_train[i:i+batch_size].requires_grad_(True)
             y_batch = y_train[i:i+batch_size]
@@ -130,7 +155,7 @@ def train(model, X_train, y_train, X_test, epochs=200000, lr=1e-4):
             
             epoch_loss += loss.item()
         
-        # Enforce symplecticity regularly
+        # Enforce symplecticity
         if epoch % 10 == 0:
             model.sympNet.enforce_symplecticity()
         
@@ -144,22 +169,21 @@ def train(model, X_train, y_train, X_test, epochs=200000, lr=1e-4):
                     best_loss = test_loss
                     torch.save(model.state_dict(), 'best_model.pth')
                     
-            print(f"Epoch {epoch} | Train Loss: {epoch_loss:.4f} | Test Loss: {test_loss:.4f}")
+            print(f"Epoch {epoch} | Train Loss: {epoch_loss:.6f} | Test Loss: {test_loss:.6f}")
 
 def evaluate(model, X_test, steps=300):
+    model.eval()
     initial = X_test[0:1].clone().to(device)
     ground_truth = X_test[:steps+1].cpu()
     
     with torch.no_grad():
-        predicted = model.predict(initial, steps).cpu()
+        # Enable gradients temporarily for physics calculations
+        with torch.enable_grad():
+            predicted = model.predict(initial, steps).cpu()
     
     return F.mse_loss(predicted, ground_truth[1:steps+1]).item()
 
 if __name__ == "__main__":
-    # Load data
-    X_train, y_train, X_test = load_data()  # Implement your data loading
-    X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
-    
-    # Initialize and train
+    X_train, y_train, X_test = load_data()
     model = PNN().to(device)
     train(model, X_train, y_train, X_test)
