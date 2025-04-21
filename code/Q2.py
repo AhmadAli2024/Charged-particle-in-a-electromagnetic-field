@@ -129,40 +129,43 @@ class PNN(nn.Module):
 
 def train_pnn(model, X_train, y_train,test=None, epochs=100, lr=0.001):
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-        #perm = torch.randperm(X_train.size(0))
-        #X_train = X_train[perm]
-        #y_train = y_train[perm]
-        #X_train = X_train[:64]
-        #y_train = y_train[:64]
+    with open("./loss.txt",'w') as loss_file:
+        for epoch in range(epochs):
+            optimizer.zero_grad()
+            #perm = torch.randperm(X_train.size(0))
+            #X_train = X_train[perm]
+            #y_train = y_train[perm]
+            #X_train = X_train[:64]
+            #y_train = y_train[:64]
 
-        pred_y = model.forward(X_train)
+            pred_y = model.forward(X_train)
 
-        # pred_y and y_train shape: [batch_size, 4]
-        # Split into momentum and position
-        pred_p, pred_q = pred_y[:, :2], pred_y[:, 2:]
-        true_p, true_q = y_train[:, :2], y_train[:, 2:]
+            # pred_y and y_train shape: [batch_size, 4]
+            # Split into momentum and position
+            pred_p, pred_q = pred_y[:, :2], pred_y[:, 2:]
+            true_p, true_q = y_train[:, :2], y_train[:, 2:]
 
-        # Compute separate MSE losses
-        loss_p = F.mse_loss(pred_p, true_p)
-        loss_q = F.mse_loss(pred_q, true_q)
+            # Compute separate MSE losses
+            loss_p = F.mse_loss(pred_p, true_p)
+            loss_q = F.mse_loss(pred_q, true_q)
 
-        # Combine them
-        mse_loss = loss_p + loss_q
+            # Combine them
+            mse_loss = loss_p + loss_q
 
-        mse_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            mse_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-        optimizer.step()
-        if epochs % 100 == 0:
-            model.sympNet.enforce_symplecticity()
 
-        # Optional symplecticity enforcement
-        if epoch % 100 == 0:
-            print(f"Epoch {epoch}, Loss: {mse_loss:.12f}")
-            if test != None:
-                evaluate_and_plot(model,test)
+            optimizer.step()
+            if epochs % 100 == 0:
+                model.sympNet.enforce_symplecticity()
+
+            # Optional symplecticity enforcement
+            if epoch % 100 == 0:
+                loss_file.write(f"{epoch},{mse_loss.item()}\n")
+                print(f"Epoch {epoch}, Loss: {mse_loss:.12f}")
+                if test != None:
+                    evaluate_and_plot(model,test)
 
     return model
 
@@ -225,7 +228,7 @@ def evaluate_and_plot(model, X_test, steps=300):
 
     if model.lowestLoss > avg_mse:
         model.lowestLoss = avg_mse
-        torch.save(pnn.state_dict(), 'Q2Model.pt')
+        #torch.save(pnn.state_dict(), 'Q2Model.pt')
         print("saved")
     
     return avg_mse, predicted_trajectory
@@ -262,13 +265,11 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     # Initialize PNN model
     pnn = PNN().to(device)
-    
     pnn.load_state_dict(torch.load('Q2Model.pt'))
-    pnn.eval()  # important for inference
-    
+    pnn.eval()  # important for inference 
     # Train the model
     print("Starting training...")
-    #pnn = train_pnn(pnn, X_train, y_train,test = X_test, epochs=200000, lr=0.0001)
+    #pnn = train_pnn(pnn, X_train, y_train,test = X_test, epochs=200000, lr=0.0005)
     print("Training complete!")
     
     # Evaluate and visualize results
