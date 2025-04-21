@@ -257,7 +257,7 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     # Initialize PNN model
     pnn = PNN().to(device)
-    pnn.load_state_dict(torch.load('Q2Model.pt'))
+    pnn.load_state_dict(torch.load('Q2Model1.pt'))
     pnn.eval()  # important for inference 
     # Train the model
     print("Starting training...")
