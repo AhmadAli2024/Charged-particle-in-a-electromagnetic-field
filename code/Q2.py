@@ -42,20 +42,6 @@ class ExtendedSympNet(nn.Module):
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
             nn.Linear(hidden_dim, 1)
         )
 
@@ -65,7 +51,7 @@ class ExtendedSympNet(nn.Module):
         self.dt_q = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
         self.dt_p = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
 
-        self.alpha = nn.Parameter(torch.tensor(0.01))
+        self.alpha = nn.Parameter(torch.tensor(0.03))
 
     def forward(self, z, dt=0.1):
         z_active = z[:, :self.active_dim]  # z1, z2
@@ -127,16 +113,17 @@ class PNN(nn.Module):
         return torch.stack(trajectory).squeeze(1)
 
 
-def train_pnn(model, X_train, y_train,test=None, epochs=100, lr=0.001):
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+def train_pnn(model, X_train, y_train,test=None, epochs=100, lr=0.0001):
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=0.0001)
     with open("./loss.txt",'w') as loss_file:
         for epoch in range(epochs):
+            perm = torch.randperm(X_train.size(0))
+            X_train = X_train[perm]
+            y_train = y_train[perm]
+            X_train = X_train[:128]
+            y_train = y_train[:128]
+
             optimizer.zero_grad()
-            #perm = torch.randperm(X_train.size(0))
-            #X_train = X_train[perm]
-            #y_train = y_train[perm]
-            #X_train = X_train[:64]
-            #y_train = y_train[:64]
 
             pred_y = model.forward(X_train)
 
@@ -184,27 +171,27 @@ def evaluate_and_plot(model, X_test, steps=300):
     predicted_trajectory = model.predict(initial_state, steps)
     
     # Plot position components (assumed to be last two dimensions)
-    plt.figure(figsize=(12, 8))
+    #plt.figure(figsize=(12, 8))
     
     # Ground truth (blue)
-    plt.plot(ground_truth[:, 2].cpu().numpy(), ground_truth[:, 3].cpu().numpy(), 
-             'b-', label='Ground Truth', linewidth=2)
+    #plt.plot(ground_truth[:, 2].cpu().numpy(), ground_truth[:, 3].cpu().numpy(), 
+    #         'b-', label='Ground Truth', linewidth=2)
     
     # Prediction (red)
-    plt.plot(predicted_trajectory[:, 2].cpu().detach().numpy(), predicted_trajectory[:, 3].cpu().detach().numpy(), 
-             'r--', label='PNN Prediction', linewidth=2)
+    #plt.plot(predicted_trajectory[:, 2].cpu().detach().numpy(), predicted_trajectory[:, 3].cpu().detach().numpy(), 
+    #         'r--', label='PNN Prediction', linewidth=2)
     
     # Highlight start point
-    plt.scatter(ground_truth[0, 2].cpu().numpy(), ground_truth[0, 3].cpu().numpy(), 
-               c='green', s=100, label='Start Point')
+    #plt.scatter(ground_truth[0, 2].cpu().numpy(), ground_truth[0, 3].cpu().numpy(), 
+    #           c='green', s=100, label='Start Point')
     
-    plt.xlabel('Position x1', fontsize=14)
-    plt.ylabel('Position x2', fontsize=14)
-    plt.title('Charged Particle Trajectory Prediction', fontsize=16)
-    plt.legend(fontsize=12)
-    plt.grid(True)
-    plt.savefig('hello.png')
-    plt.show()
+    #plt.xlabel('Position x1', fontsize=14)
+    #plt.ylabel('Position x2', fontsize=14)
+    #plt.title('Charged Particle Trajectory Prediction', fontsize=16)
+    #plt.legend(fontsize=12)
+    #plt.grid(True)
+    #plt.savefig('hello.png')
+    #plt.show()
     
     # Calculate and plot MSE over time
     mse_over_time = []
@@ -222,14 +209,15 @@ def evaluate_and_plot(model, X_test, steps=300):
     
     # Calculate average MSE
     avg_mse = sum(mse_over_time) / len(mse_over_time)
-    print(f"Average MSE over {len(mse_over_time)} time steps: {avg_mse:.6f}")
+    print(f"avg: {avg_mse}, total: {sum(mse_over_time)}")
 
-    model.train()
 
     if model.lowestLoss > avg_mse:
         model.lowestLoss = avg_mse
-        #torch.save(pnn.state_dict(), 'Q2Model.pt')
+        torch.save(pnn.state_dict(), 'Q2Model.pt')
         print("saved")
+
+    model.train()
     
     return avg_mse, predicted_trajectory
 
@@ -257,6 +245,7 @@ if __name__ == "__main__":
     # Create test tensors
     X_test = torch.cat([test_p, test_q], dim=1)
     y_test = X_test[1:].clone()  # The target is the next state in the sequence
+
     X_train = X_train.to(device)
     y_train = y_train.to(device)
     X_test = X_test.to(device)
@@ -265,11 +254,11 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     # Initialize PNN model
     pnn = PNN().to(device)
-    pnn.load_state_dict(torch.load('Q2Model.pt'))
-    pnn.eval()  # important for inference 
+    #pnn.load_state_dict(torch.load('Q2Model.pt'))
+    #pnn.eval()  # important for inference 
     # Train the model
     print("Starting training...")
-    #pnn = train_pnn(pnn, X_train, y_train,test = X_test, epochs=200000, lr=0.0005)
+    pnn = train_pnn(pnn, X_train, y_train,test = X_test, epochs=200000, lr=0.00001)
     print("Training complete!")
     
     # Evaluate and visualize results
