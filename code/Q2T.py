@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -14,8 +13,8 @@ class NICECouplingLayer(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, dim//2)
-        )
-        
+        ).to(device)
+
     def forward(self, x):
         x1, x2 = x.chunk(2, dim=1)
         y1 = x1
@@ -41,39 +40,29 @@ class ExtendedSympNet(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Dropout(dropout),
             nn.Linear(hidden_dim, 1)
-        )
+        ).to(device)
 
-        self.S = nn.Parameter(torch.zeros(active_dim, active_dim))
-        torch.nn.init.normal_(self.S, 0, 0.1)
-        self.dt_q = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
-        self.dt_p = nn.Parameter(torch.randn(1) * 0.1 + 0.5)
-        self.alpha = nn.Parameter(torch.tensor(0.0001))
+        self.S = nn.Parameter(torch.zeros(active_dim, active_dim, device=device))
+        self.dt_q = nn.Parameter(torch.randn(1, device=device) * 0.1 + 0.5)
+        self.dt_p = nn.Parameter(torch.randn(1, device=device) * 0.1 + 0.5)
+        self.alpha = nn.Parameter(torch.tensor(0.0001, device=device))
 
     def forward(self, z, dt=0.1):
-        # Ensure gradient tracking
+        # Maintain gradient flow
         z = z.clone().requires_grad_(True)
         z_active = z[:, :self.active_dim]
-        z_aux = z[:, self.active_dim:]
-
-        # Split active dimensions
+        
+        # Split into components that need gradients
         z1 = z_active[:, :2].requires_grad_(True)
         z2 = z_active[:, 2:].requires_grad_(True)
+        z_aux = z[:, self.active_dim:]
 
         # Compute Hamiltonian
         z_combined = torch.cat([z1, z2, z_aux], dim=1)
         H = self.H_net(z_combined).sum()
 
-        # Compute gradients
+        # Calculate gradients properly
         dHdz1 = torch.autograd.grad(H, z1, retain_graph=True, create_graph=True)[0]
         dHdz2 = torch.autograd.grad(H, z2, retain_graph=True, create_graph=True)[0]
 
@@ -81,7 +70,7 @@ class ExtendedSympNet(nn.Module):
         S = self.S - self.S.t()
         dz1 = dHdz2 * self.dt_q + self.alpha * (z_active @ S.t())[:, :2]
         dz2 = -dHdz1 * self.dt_p + self.alpha * (z_active @ S)[:, 2:]
-
+        
         z_active_new = z_active + dt * torch.cat([dz1, dz2], dim=1)
         return torch.cat([z_active_new, z_aux], dim=1)
 
@@ -92,44 +81,32 @@ class ExtendedSympNet(nn.Module):
             self.dt_p.data.abs_()
 
 class PNN(nn.Module):
-    def __init__(self, dropout=0.3):
+    def __init__(self):
         super().__init__()
         self.transformer = NICECouplingLayer(4, 125)
-        self.sympNet = ExtendedSympNet(4, dropout=dropout)
+        self.sympNet = ExtendedSympNet(4)
         self.lowestLoss = float('inf')
 
     def forward(self, x):
-        x.requires_grad_(True)
+        # Maintain gradient flow through the entire network
+        x = x.clone().requires_grad_(True)
         theta = self.transformer(x)
         phi = self.sympNet(theta)
         return self.transformer.inverse(phi)
 
     def predict(self, x, steps):
-        trajectory = []
+        trajectory = [x.detach()]
         current = x.clone().requires_grad_(True)
-        for _ in range(steps):
-            current = self.forward(current).detach().requires_grad_(True)
-            trajectory.append(current)
+        
+        with torch.set_grad_enabled(False):  # Disable grad during prediction
+            for _ in range(steps):
+                current = self.forward(current).detach()
+                trajectory.append(current)
         return torch.stack(trajectory)
 
-def load_data():
-    # Load and prepare data
-    with open('../data/train.txt', 'r') as f:
-        train_data = torch.tensor([list(map(float, line.split())) for line in f if line.strip()]).float()
-    
-    with open('../data/test.txt', 'r') as f:
-        test_data = torch.tensor([list(map(float, line.split())) for line in f if line.strip()]).float()
-    
-    X_train = torch.cat([train_data[:1200, :2], train_data[:1200, 2:]], dim=1).to(device)
-    y_train = torch.cat([train_data[1:1201, :2], train_data[1:1201, 2:]], dim=1).to(device)
-    X_test = torch.cat([test_data[:, :2], test_data[:, 2:]], dim=1).to(device)
-    
-    return X_train, y_train, X_test
-
-def train(model, X_train, y_train, X_test, epochs=200000, lr=0.0001):
+def train(model, X_train, y_train, X_test, epochs=200000, lr=1e-4):
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=500, factor=0.5)
     
     best_loss = float('inf')
     batch_size = 256
@@ -138,10 +115,7 @@ def train(model, X_train, y_train, X_test, epochs=200000, lr=0.0001):
         model.train()
         epoch_loss = 0
         
-        # Shuffle data
-        perm = torch.randperm(len(X_train))
-        X_train, y_train = X_train[perm], y_train[perm]
-        
+        # Training loop
         for i in range(0, len(X_train), batch_size):
             X_batch = X_train[i:i+batch_size].requires_grad_(True)
             y_batch = y_train[i:i+batch_size]
@@ -151,47 +125,41 @@ def train(model, X_train, y_train, X_test, epochs=200000, lr=0.0001):
             loss = F.mse_loss(pred, y_batch)
             
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             
             epoch_loss += loss.item()
         
-        # Enforce symplecticity
+        # Enforce symplecticity regularly
         if epoch % 10 == 0:
             model.sympNet.enforce_symplecticity()
         
-        # Evaluation
+        # Validation
         if epoch % 100 == 0:
             model.eval()
             with torch.no_grad():
                 test_loss = evaluate(model, X_test)
-                scheduler.step(test_loss)
                 
                 if test_loss < best_loss:
                     best_loss = test_loss
-                    model.lowestLoss = best_loss
-                    torch.save(model.state_dict(), 'best_model.pt')
-                    print(f"Saved new best model with test loss: {best_loss:.6f}")
-            
-            print(f"Epoch {epoch} | Train Loss: {epoch_loss/(len(X_train)/batch_size):.6f} | Test Loss: {test_loss:.6f}")
+                    torch.save(model.state_dict(), 'best_model.pth')
+                    
+            print(f"Epoch {epoch} | Train Loss: {epoch_loss:.4f} | Test Loss: {test_loss:.4f}")
 
 def evaluate(model, X_test, steps=300):
-    initial = X_test[0:1].clone().requires_grad_(True)
-    ground_truth = X_test[:steps+1]
+    initial = X_test[0:1].clone().to(device)
+    ground_truth = X_test[:steps+1].cpu()
     
-    predicted = model.predict(initial, steps)
+    with torch.no_grad():
+        predicted = model.predict(initial, steps).cpu()
+    
     return F.mse_loss(predicted, ground_truth[1:steps+1]).item()
 
 if __name__ == "__main__":
     # Load data
-    X_train, y_train, X_test = load_data()
+    X_train, y_train, X_test = load_data()  # Implement your data loading
+    X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
     
-    # Initialize and train model
-    model = PNN()
-    print("Starting training...")
+    # Initialize and train
+    model = PNN().to(device)
     train(model, X_train, y_train, X_test)
-    print("Training complete!")
-    
-    # Final evaluation
-    final_loss = evaluate(model, X_test)
-    print(f"Final test loss: {final_loss:.6f}")
