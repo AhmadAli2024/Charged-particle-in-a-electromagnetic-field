@@ -30,20 +30,27 @@ class NICECouplingLayer(nn.Module):
         return torch.cat([x1, x2], dim=1)
 
 class ExtendedSympNet(nn.Module):
-    def __init__(self, latent_dim, active_dim=4, hidden_dim=64):
+    def __init__(self, latent_dim, active_dim=4, hidden_dim=64,dropout=0.1):
         super().__init__()
         self.active_dim = active_dim
         self.latent_dim = latent_dim
 
         self.H_net = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
-            nn.Tanh(),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, 1)
         )
 
@@ -95,11 +102,11 @@ class ExtendedSympNet(nn.Module):
 
 
 class PNN(nn.Module):
-    def __init__(self):
+    def __init__(self,dropout=0.1):
         super().__init__()
         self.transformer = NICECouplingLayer(4, 125)
-        self.sympNet = ExtendedSympNet(4)
-        self.lowestLoss = 100000000.0
+        self.sympNet = ExtendedSympNet(4,dropout=0.1)
+        self.lowestLoss = 1e20
 
     def forward(self, x):
         theta = self.transformer.forward(x)
@@ -117,14 +124,14 @@ class PNN(nn.Module):
 
 
 def train_pnn(model, X_train, y_train,test=None, epochs=100, lr=0.0001):
-    optimizer = torch.optim.RMSprop(model.parameters(), lr=lr,momentum=0.9, alpha=0.99, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
     with open("./loss.txt",'w') as loss_file:
         for epoch in range(epochs):
             perm = torch.randperm(X_train.size(0))
             X_train = X_train[perm]
             y_train = y_train[perm]
-            X_train = X_train[:128]
-            y_train = y_train[:128]
+            X_train = X_train[:200]
+            y_train = y_train[:200]
 
             optimizer.zero_grad()
 
@@ -174,27 +181,27 @@ def evaluate_and_plot(model, X_test, steps=300):
     predicted_trajectory = model.predict(initial_state, steps)
     
     # Plot position components (assumed to be last two dimensions)
-    plt.figure(figsize=(12, 8))
+    #plt.figure(figsize=(12, 8))
     
     # Ground truth (blue)
-    plt.plot(ground_truth[:, 2].cpu().numpy(), ground_truth[:, 3].cpu().numpy(), 
-             'b-', label='Ground Truth', linewidth=2)
+    #plt.plot(ground_truth[:, 2].cpu().numpy(), ground_truth[:, 3].cpu().numpy(), 
+    #         'b-', label='Ground Truth', linewidth=2)
     
     # Prediction (red)
-    plt.plot(predicted_trajectory[:, 2].cpu().detach().numpy(), predicted_trajectory[:, 3].cpu().detach().numpy(), 
-             'r--', label='PNN Prediction', linewidth=2)
+    #plt.plot(predicted_trajectory[:, 2].cpu().detach().numpy(), predicted_trajectory[:, 3].cpu().detach().numpy(), 
+    #         'r--', label='PNN Prediction', linewidth=2)
     
     # Highlight start point
-    plt.scatter(ground_truth[0, 2].cpu().numpy(), ground_truth[0, 3].cpu().numpy(), 
-               c='green', s=100, label='Start Point')
+    #plt.scatter(ground_truth[0, 2].cpu().numpy(), ground_truth[0, 3].cpu().numpy(), 
+    #           c='green', s=100, label='Start Point')
     
-    plt.xlabel('Position x1', fontsize=14)
-    plt.ylabel('Position x2', fontsize=14)
-    plt.title('Charged Particle Trajectory Prediction', fontsize=16)
-    plt.legend(fontsize=12)
-    plt.grid(True)
-    plt.savefig('hello.png')
-    plt.show()
+    #plt.xlabel('Position x1', fontsize=14)
+    #plt.ylabel('Position x2', fontsize=14)
+    #plt.title('Charged Particle Trajectory Prediction', fontsize=16)
+    #plt.legend(fontsize=12)
+    #plt.grid(True)
+    #plt.savefig('hello.png')
+    #plt.show()
     
     # Calculate and plot MSE over time
     mse_over_time = []
@@ -257,11 +264,11 @@ if __name__ == "__main__":
     torch.manual_seed(42)
     # Initialize PNN model
     pnn = PNN().to(device)
-    pnn.load_state_dict(torch.load('Q2Model1.pt'))
-    pnn.eval()  # important for inference 
+    #pnn.load_state_dict(torch.load('Q2Model1.pt'))
+    #pnn.eval()  # important for inference 
     # Train the model
     print("Starting training...")
-    #pnn = train_pnn(pnn, X_train, y_train,test = X_test, epochs=200000, lr=0.00001)
+    pnn = train_pnn(pnn, X_train, y_train,test = X_test, epochs=200000, lr=0.00001)
     print("Training complete!")
     
     # Evaluate and visualize results
