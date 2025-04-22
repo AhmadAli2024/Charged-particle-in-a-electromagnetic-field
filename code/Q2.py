@@ -115,15 +115,27 @@ class PNN(nn.Module):
         return thetaI
 
     def predict(self, x, steps):
-        trajectory = [x.detach().cpu()]
-        x = x.clone().requires_grad_(True)
-        
+        trajectory = [x]  # Keep full tensor on GPU
+        current = x.clone()
+
         for _ in range(steps):
-            with torch.set_grad_enabled(True):
-                x = self.forward(x)
-                trajectory.append(x.detach().cpu())
-        
-        return torch.stack(trajectory).squeeze(1)
+            with torch.enable_grad():
+                current = current.requires_grad_(True)
+                next_step = self.forward(current)
+            trajectory.append(next_step)  # Keep on GPU
+            current = next_step.detach()  # Still on GPU
+        return torch.cat(trajectory)  # Stack on GPU
+
+    #def predict(self, x, steps):
+    #    trajectory = [x.detach().cpu()]
+    #    x = x.clone().requires_grad_(True)
+    #    
+    #    for _ in range(steps):
+    #        with torch.set_grad_enabled(True):
+    #            x = self.forward(x)
+    #            trajectory.append(x.detach().cpu())
+    #    
+    #    return torch.stack(trajectory).squeeze(1)
 
 def train_pnn(model, X_train, y_train, test=None, epochs=100, lr=0.0001):
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)

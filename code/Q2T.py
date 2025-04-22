@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-print("hello")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class NICECouplingLayer(nn.Module):
@@ -14,7 +13,7 @@ class NICECouplingLayer(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
             nn.Linear(hidden_dim, dim//2)
-        ).to(device)
+        )
 
     def forward(self, x):
         x1, x2 = x.chunk(2, dim=1)
@@ -36,19 +35,22 @@ class ExtendedSympNet(nn.Module):
 
         self.H_net = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.LeakyReLU(0.01),  # Experiment
-            nn.Dropout(0.3),      # Increased dropout
+            nn.Tanh(),  
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.BatchNorm1d(hidden_dim),
-            nn.LeakyReLU(0.01),
-            nn.Dropout(0.4),      # Higher dropout in deeper layers
-            nn.Linear(hidden_dim, hidden_dim//2),  # Reduce width gradually
-            nn.BatchNorm1d(hidden_dim//2),
-            nn.LeakyReLU(0.01),
-            nn.Dropout(0.4),
-            nn.Linear(hidden_dim//2, 1)
-        ).to(device)    
+            nn.Tanh(),  
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),  
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),  
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),  
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1)
+        )
 
         self.S = nn.Parameter(torch.zeros(active_dim, active_dim, device=device))
         self.dt_q = nn.Parameter(torch.randn(1, device=device) * 0.1 + 0.5)
@@ -105,6 +107,7 @@ class PNN(nn.Module):
         phi = self.sympNet(theta)
         return self.transformer.inverse(phi)
 
+
     def predict(self, x, steps):
         trajectory = [x.detach()[0]]
         current = x.clone()
@@ -131,16 +134,12 @@ def load_data():
     train_data = torch.tensor(train_lines[:1200], dtype=torch.float32)
     test_data = torch.tensor(test_lines, dtype=torch.float32)
 
-    # Create training pairs
-    X_train = train_data.to(device)
-    y_train = torch.tensor(train_lines[1:1201], dtype=torch.float32).to(device)
-    X_test = test_data.to(device)
+    return train_data, torch.tensor(train_lines[1:1201], dtype=torch.float32), test_data
 
-    return X_train, y_train, X_test
-
-def train(model, X_train, y_train, X_test, epochs=200000, lr=0.00001):
+def train(model, X_train, y_train, X_test, epochs=200000, lr=0.0001):
     model = model.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
+    X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-3)
     
     best_loss = float('inf')
     batch_size = 64
@@ -184,7 +183,6 @@ def train(model, X_train, y_train, X_test, epochs=200000, lr=0.00001):
             print(f"Epoch {epoch} | Train Loss: {epoch_loss:.6f} | Test Loss: {test_loss:.6f}")
 
 
-
 def evaluate(model, X_test, steps=300):
     model.eval()
     initial = X_test[0:1].clone().to(device)
@@ -200,4 +198,5 @@ def evaluate(model, X_test, steps=300):
 if __name__ == "__main__":
     X_train, y_train, X_test = load_data()
     model = PNN().to(device)
+    X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
     train(model, X_train, y_train, X_test)
