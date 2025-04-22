@@ -1,6 +1,8 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+print("hello")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class NICECouplingLayer(nn.Module):
@@ -27,26 +29,26 @@ class NICECouplingLayer(nn.Module):
         return torch.cat([x1, x2], dim=1)
 
 class ExtendedSympNet(nn.Module):
-    def __init__(self, latent_dim, active_dim=4, hidden_dim=128, dropout=0.1):
+    def __init__(self, latent_dim, active_dim=4, hidden_dim=64, dropout=0.5):
         super().__init__()
         self.active_dim = active_dim
         self.latent_dim = latent_dim
 
         self.H_net = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Dropout(dropout),
+            nn.BatchNorm1d(hidden_dim),
+            nn.LeakyReLU(0.01),  # Experiment
+            nn.Dropout(0.3),      # Increased dropout
             nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 1)
-        ).to(device)
+            nn.BatchNorm1d(hidden_dim),
+            nn.LeakyReLU(0.01),
+            nn.Dropout(0.4),      # Higher dropout in deeper layers
+            nn.Linear(hidden_dim, hidden_dim//2),  # Reduce width gradually
+            nn.BatchNorm1d(hidden_dim//2),
+            nn.LeakyReLU(0.01),
+            nn.Dropout(0.4),
+            nn.Linear(hidden_dim//2, 1)
+        ).to(device)    
 
         self.S = nn.Parameter(torch.zeros(active_dim, active_dim, device=device))
         self.dt_q = nn.Parameter(torch.randn(1, device=device) * 0.1 + 0.5)
@@ -136,7 +138,7 @@ def load_data():
 
     return X_train, y_train, X_test
 
-def train(model, X_train, y_train, X_test, epochs=200000, lr=0.0001):
+def train(model, X_train, y_train, X_test, epochs=200000, lr=0.00001):
     model = model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     
