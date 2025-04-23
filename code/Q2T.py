@@ -134,7 +134,7 @@ def load_data():
 
     # Process data
     train_data = torch.tensor(train_lines[:1200], dtype=torch.float32)
-    test_data = torch.tensor(test_lines, dtype=torch.float32)
+    test_data = torch.tensor(test_lines[:300], dtype=torch.float32)
 
     return train_data, torch.tensor(train_lines[1:1201], dtype=torch.float32), test_data
 
@@ -181,7 +181,7 @@ def train(model, X_train, y_train, X_test, epochs=200000, lr=0.0003):
                 if test_loss < best_loss:
                     best_loss = test_loss
                     torch.save(model.state_dict(), 'best_model.pth')
-                    plot(X_test,model.predict(X_test[0:1].clone().to(device),300))
+                    plot(X_test,model.predict(X_test[0:1].clone().to(device),299))
                     
             print(f"Epoch {epoch} | Train Loss: {epoch_loss:.6f} | Test Loss: {test_loss:.6f}")
 
@@ -196,10 +196,12 @@ def evaluate(model, X_test, steps=300):
         with torch.enable_grad():
             predicted = model.predict(initial, steps-1).cpu()
     
-    return F.mse_loss(predicted, ground_truth[1:steps+1]).sum()
+    return F.mse_loss(predicted, ground_truth).sum()
 
 
 def plot(ground_truth, predicted_trajectory, save_path='test.png', show=True):
+    print(predicted_trajectory.shape)
+    print(ground_truth.shape)
     if os.path.exists(save_path):
         os.remove(save_path)
     plt.figure(figsize=(8, 6))
