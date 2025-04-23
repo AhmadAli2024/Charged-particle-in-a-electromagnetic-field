@@ -30,7 +30,7 @@ class NICECouplingLayer(nn.Module):
         return torch.cat([x1, x2], dim=1)
 
 class ExtendedSympNet(nn.Module):
-    def __init__(self, latent_dim, active_dim=4, hidden_dim=128, dropout=0.2):
+    def __init__(self, latent_dim, active_dim=4, hidden_dim=128, dropout=0.3):
         super().__init__()
         self.active_dim = active_dim
         self.latent_dim = latent_dim
@@ -182,6 +182,7 @@ def train(model, X_train, y_train, X_test, epochs=200000, lr=0.0003):
                     best_loss = test_loss
                     torch.save(model.state_dict(), 'best_model.pth')
                     plot(X_test,model.predict(X_test[0:1].clone().to(device),299))
+                    print("plotted")
                     
             print(f"Epoch {epoch} | Train Loss: {epoch_loss:.6f} | Test Loss: {test_loss:.6f}")
 
@@ -200,8 +201,6 @@ def evaluate(model, X_test, steps=300):
 
 
 def plot(ground_truth, predicted_trajectory, save_path='test.png', show=True):
-    print(predicted_trajectory.shape)
-    print(ground_truth.shape)
     if os.path.exists(save_path):
         os.remove(save_path)
     plt.figure(figsize=(8, 6))
