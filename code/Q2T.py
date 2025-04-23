@@ -30,7 +30,7 @@ class NICECouplingLayer(nn.Module):
         return torch.cat([x1, x2], dim=1)
 
 class ExtendedSympNet(nn.Module):
-    def __init__(self, latent_dim, active_dim=4, hidden_dim=128, dropout=0.3):
+    def __init__(self, latent_dim, active_dim=4, hidden_dim=64, dropout=0.2):
         super().__init__()
         self.active_dim = active_dim
         self.latent_dim = latent_dim
@@ -48,10 +48,7 @@ class ExtendedSympNet(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),  
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim//2),
-            nn.Tanh(),  
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim//2, 1)
+            nn.Linear(hidden_dim, 1)
         )
 
         self.S = nn.Parameter(torch.zeros(active_dim, active_dim, device=device))
@@ -99,7 +96,7 @@ class ExtendedSympNet(nn.Module):
 class PNN(nn.Module):
     def __init__(self):
         super().__init__()
-        self.transformer = NICECouplingLayer(4, 128)
+        self.transformer = NICECouplingLayer(4, 64)
         self.sympNet = ExtendedSympNet(4)
         self.lowestLoss = float('inf')
 
@@ -138,13 +135,13 @@ def load_data():
 
     return train_data, torch.tensor(train_lines[1:1201], dtype=torch.float32), test_data
 
-def train(model, X_train, y_train, X_test, epochs=200000, lr=0.0002):
+def train(model, X_train, y_train, X_test, epochs=200000, lr=0.0001):
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     
     best_loss = float('inf')
-    batch_size = 256
+    batch_size = 32 
     
     for epoch in range(epochs):
         model.train()
