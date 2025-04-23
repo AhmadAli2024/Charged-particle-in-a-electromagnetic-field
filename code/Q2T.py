@@ -1,4 +1,5 @@
 import torch
+import os
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
@@ -197,9 +198,10 @@ def evaluate(model, X_test, steps=300):
     
     return F.mse_loss(predicted, ground_truth[1:steps+1]).sum()
 
-import matplotlib.pyplot as plt
 
 def plot(ground_truth, predicted_trajectory, save_path='test.png', show=True):
+    if os.path.exists(save_path):
+        os.remove(save_path)
     plt.figure(figsize=(8, 6))
 
     # Ground truth trajectory
