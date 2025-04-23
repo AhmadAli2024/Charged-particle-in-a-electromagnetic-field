@@ -197,22 +197,41 @@ def evaluate(model, X_test, steps=300):
     
     return F.mse_loss(predicted, ground_truth[1:steps+1]).sum()
 
-def plot(ground_truth,predicted_trajectory):
-    plt.plot(ground_truth[:, 2].cpu().numpy(), ground_truth[:, 3].cpu().numpy(), 
-             'b-', label='Ground Truth', linewidth=2)
-    
-    plt.plot(predicted_trajectory[:, 2].cpu().detach().numpy(), predicted_trajectory[:, 3].cpu().detach().numpy(), 
-             'r--', label='PNN Prediction', linewidth=2)
-    
-    plt.scatter(ground_truth[0, 2].cpu().numpy(), ground_truth[0, 3].cpu().numpy(), 
-               c='green', s=100, label='Start Point')
-    
-    plt.xlabel('Position x1', fontsize=14)
-    plt.ylabel('Position x2', fontsize=14)
+import matplotlib.pyplot as plt
+
+def plot(ground_truth, predicted_trajectory, save_path='test.png', show=True):
+    plt.figure(figsize=(8, 6))
+
+    # Ground truth trajectory
+    plt.plot(
+        ground_truth[:, 2].cpu().numpy(), ground_truth[:, 3].cpu().numpy(),
+        'b-', label='Ground Truth', linewidth=2
+    )
+
+    # Predicted trajectory
+    plt.plot(
+        predicted_trajectory[:, 2].cpu().detach().numpy(), predicted_trajectory[:, 3].cpu().detach().numpy(),
+        'r--', label='PNN Prediction', linewidth=2
+    )
+
+    # Start point
+    plt.scatter(
+        ground_truth[0, 2].cpu().numpy(), ground_truth[0, 3].cpu().numpy(),
+        c='green', s=100, label='Start Point'
+    )
+
+    plt.xlabel('Position $x_1$', fontsize=14)
+    plt.ylabel('Position $x_2$', fontsize=14)
     plt.title('Charged Particle Trajectory Prediction', fontsize=16)
     plt.legend(fontsize=12)
     plt.grid(True)
-    plt.savefig('test.png')
+    plt.axis('equal')  # Maintains spatial proportions
+
+    plt.tight_layout()
+    plt.savefig(save_path)
+    if show:
+        plt.show()
+    plt.close()
 
 if __name__ == "__main__":
     X_train, y_train, X_test = load_data()
