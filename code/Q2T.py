@@ -30,7 +30,7 @@ class NICECouplingLayer(nn.Module):
         return torch.cat([x1, x2], dim=1)
 
 class ExtendedSympNet(nn.Module):
-    def __init__(self, latent_dim, active_dim=4, hidden_dim=64, dropout=0.2):
+    def __init__(self, latent_dim, active_dim=4, hidden_dim=64, dropout=0.5):
         super().__init__()
         self.active_dim = active_dim
         self.latent_dim = latent_dim
@@ -38,16 +38,14 @@ class ExtendedSympNet(nn.Module):
         self.H_net = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
             nn.Tanh(),  
-            nn.Dropout(dropout),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),  
-            nn.Dropout(dropout),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),  
-            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),  
-            nn.Dropout(dropout),
             nn.Linear(hidden_dim, 1)
         )
 
@@ -131,25 +129,30 @@ def load_data():
 
     # Process data
     train_data = torch.tensor(train_lines[:1200], dtype=torch.float32)
+    trainP_data = torch.tensor(train_lines[1:1201], dtype=torch.float32)
     test_data = torch.tensor(test_lines[:300], dtype=torch.float32)
+    
+    train_data = torch.nn.functional.normalize(train_data, p=2, dim=1)
+    test_data = torch.nn.functional.normalize(test_data, p=2, dim=1)
+    trainP_data = torch.nn.functional.normalize(trainP_data, p=2, dim=1)
 
-    return train_data, torch.tensor(train_lines[1:1201], dtype=torch.float32), test_data
+    return train_data, trainP_data, test_data
 
-def train(model, X_train, y_train, X_test, epochs=200000, lr=0.0001):
+def train(model, X_train, y_train, X_test, epochs=200000, lr=0.00005):
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     
     best_loss = float('inf')
-    batch_size = 32 
+    batch_size = 256 
     
     for epoch in range(epochs):
         model.train()
         epoch_loss = 0
         
         # Shuffle data
-        #perm = torch.randperm(len(X_train))
-        #X_train, y_train = X_train[perm], y_train[perm]
+        perm = torch.randperm(len(X_train))
+        X_train, y_train = X_train[perm], y_train[perm]
         
         for i in range(0, len(X_train), batch_size):
             X_batch = X_train[i:i+batch_size].requires_grad_(True)
@@ -166,7 +169,7 @@ def train(model, X_train, y_train, X_test, epochs=200000, lr=0.0001):
             epoch_loss += loss.item()
         
         # Enforce symplecticity
-        if epoch % 50 == 0:
+        if epoch % 100 == 0:
             model.sympNet.enforce_symplecticity()
         
         # Validation
