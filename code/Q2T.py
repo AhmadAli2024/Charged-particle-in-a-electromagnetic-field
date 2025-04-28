@@ -173,9 +173,11 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
         if epoch % 100 == 0:
             model.sympNet.enforce_symplecticity()
 
-        if epoch % 2000 == 0:
+        if epoch % 3000 == 0:
             if lr >= 0.0005:
                 lr-=0.0001
+            elif lr <= 0.00001:
+                pass
             else:
                 lr/=2
 
