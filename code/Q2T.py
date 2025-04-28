@@ -38,12 +38,10 @@ class ExtendedSympNet(nn.Module):
         self.H_net = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
             nn.Tanh(),  
-            nn.Dropout(0.5),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),  
-            nn.Dropout(0.4),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),  
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),  
             nn.Linear(hidden_dim, hidden_dim),
@@ -141,12 +139,13 @@ def load_data():
     return train_data, trainP_data, test_data
 
 def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
+
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     
     best_loss = float('inf')
-    batch_size = 248 
+    batch_size = 512 
     
     for epoch in range(epochs):
         model.train()
@@ -173,6 +172,13 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
         # Enforce symplecticity
         if epoch % 100 == 0:
             model.sympNet.enforce_symplecticity()
+
+        if epoch % 2000 == 0:
+            if lr >= 0.0005:
+                lr-=0.0001
+            else:
+                lr/=2
+
         
         # Validation
         if epoch % 100 == 0:
