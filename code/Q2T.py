@@ -46,6 +46,8 @@ class ExtendedSympNet(nn.Module):
             nn.Tanh(),  
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),  
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),  
             nn.Linear(hidden_dim, 1)
         )
 
