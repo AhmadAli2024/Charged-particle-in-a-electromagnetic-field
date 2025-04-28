@@ -30,7 +30,7 @@ class NICECouplingLayer(nn.Module):
         return torch.cat([x1, x2], dim=1)
 
 class ExtendedSympNet(nn.Module):
-    def __init__(self, latent_dim, active_dim=4, hidden_dim=128, dropout=0.5):
+    def __init__(self, latent_dim, active_dim=4, hidden_dim=100, dropout=0.5):
         super().__init__()
         self.active_dim = active_dim
         self.latent_dim = latent_dim
@@ -38,7 +38,10 @@ class ExtendedSympNet(nn.Module):
         self.H_net = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
             nn.Tanh(),  
-            nn.Dropout(0.2),
+            nn.Dropout(0.4),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),  
+            nn.Dropout(0.3),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),  
             nn.Dropout(0.2),
@@ -147,7 +150,7 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     
     best_loss = float('inf')
-    batch_size = 512 
+    batch_size = 100 
     
     for epoch in range(epochs):
         model.train()
@@ -178,7 +181,7 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
         if epoch % 3000 == 0:
             if lr >= 0.0005:
                 lr-=0.0001
-            elif lr <= 0.00001:
+            elif lr <= 0.000005:
                 pass
             else:
                 lr/=2
