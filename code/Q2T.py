@@ -30,7 +30,7 @@ class NICECouplingLayer(nn.Module):
         return torch.cat([x1, x2], dim=1)
 
 class ExtendedSympNet(nn.Module):
-    def __init__(self, latent_dim, active_dim=4, hidden_dim=100, dropout=0.5):
+    def __init__(self, latent_dim, active_dim=4, hidden_dim=50, dropout=0.5):
         super().__init__()
         self.active_dim = active_dim
         self.latent_dim = latent_dim
@@ -38,17 +38,12 @@ class ExtendedSympNet(nn.Module):
         self.H_net = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
             nn.Tanh(),  
-            nn.Dropout(0.4),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),  
-            nn.Dropout(0.3),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),  
             nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),  
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),  
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),  
             nn.Linear(hidden_dim, 1)
@@ -143,14 +138,20 @@ def load_data():
 
     return train_data, trainP_data, test_data
 
-def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
+def train(model, X_train, y_train, X_test, epochs=500000, lr=0.002):
 
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
-    
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=lr,              # or your specific learning rate
+        weight_decay=1e-5,    # small weight decay for stability
+        betas=(0.9, 0.999),   # default AdamW momentum settings
+        eps=1e-8              # numerical stability
+    )
+
     best_loss = float('inf')
-    batch_size = 100 
+    batch_size = 512 
     
     for epoch in range(epochs):
         model.train()
@@ -175,16 +176,14 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
             epoch_loss += loss.item()
         
         # Enforce symplecticity
-        if epoch % 100 == 0:
+        if epoch % 50 == 0:
             model.sympNet.enforce_symplecticity()
 
-        if epoch % 3000 == 0:
+        if epoch % 2000 == 0:
             if lr >= 0.0005:
-                lr-=0.0001
-            elif lr <= 0.000005:
-                pass
-            else:
-                lr/=2
+                lr*=0.8
+
+
 
         
         # Validation
@@ -199,7 +198,7 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
                     plot(X_test,model.predict(X_test[0:1].clone().to(device),299))
                     print("plotted")
                     
-            print(f"Epoch {epoch} | Train Loss: {epoch_loss:.6f} | Test Loss: {test_loss:.6f}")
+            print(f"Epoch {epoch} | Train Loss: {epoch_loss:.6f} | Test Loss: {test_loss:.6f} | LR: {lr}")
 
 
 def evaluate(model, X_test, steps=300):
