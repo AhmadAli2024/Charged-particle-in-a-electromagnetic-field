@@ -120,11 +120,11 @@ class PNN(nn.Module):
 
 def load_data():
     # Load training data
-    with open('../data/train.txt', 'r') as f:
+    with open('../../data/train.txt', 'r') as f:
         train_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
     
     # Load testing data
-    with open('../data/test.txt', 'r') as f:
+    with open('../../data/test.txt', 'r') as f:
         test_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
 
     # Process data

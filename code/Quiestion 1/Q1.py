@@ -176,7 +176,7 @@ class SympNet(nn.Module):
             
         return torch.cat(trajectory, dim=0)  # Return as batch
 
-def load_data(train_path='../data/train.txt', test_path='../data/test.txt'):
+def load_data(train_path='../../data/train.txt', test_path='../../data/test.txt'):
     """Load and preprocess data with error handling"""
     try:
         # Load training data
