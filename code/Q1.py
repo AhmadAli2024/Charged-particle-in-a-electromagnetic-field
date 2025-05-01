@@ -272,7 +272,35 @@ def plot(ground_truth, predicted_trajectory, save_path='test.png', show=True):
     
     plt.close()
 
-def train(model, X_train, y_train, X_test, epochs=100000, lr=0.001, batch_size=512, 
+
+def plotMSE(loss, save_path='test.png', show=True):
+    """Plot the ground truth vs predicted trajectory"""
+    if os.path.exists(save_path):
+        os.remove(save_path)
+        
+    plt.figure(figsize=(8, 6))
+    
+    t = torch.arange(len(loss))
+
+    plt.plot(t.numpy(),loss.cpu().numpy())
+    plt.xlabel("Step(0.1 Seconds)")
+    plt.ylabel("MSE Loss")
+    plt.title("MSE Vs Time")
+
+    
+    try:
+        plt.savefig(save_path)
+        print(f"Plot saved to {save_path}")
+    except Exception as e:
+        print(f"Error saving plot: {e}")
+    
+    if show:
+        plt.show()
+    
+    plt.close()
+
+
+def train(model, X_train, y_train, X_test, epochs=5000000, lr=0.001, batch_size=512, 
           save_path='best_model.pth', patience=10):
     """Train the model with improved techniques"""
     model = model.to(device)
@@ -345,10 +373,12 @@ def train(model, X_train, y_train, X_test, epochs=100000, lr=0.001, batch_size=5
                     
                     # Plot trajectory
                     pred_trajectory = model.predict(X_test[0:1].clone().to(device), 299)
+                    mse_T = F.mse_loss(pred_trajectory,X_test[:300],reduction='none').mean(dim=1)
+                    plotMSE(mse_T,save_path=f'MSE_{epoch}.png')
                     plot(X_test[:300], pred_trajectory, save_path=f'trajectory_epoch_{epoch}.png')
                     print(f"New best model saved. Test Loss: {test_loss:.6f}")
-                else:
-                    no_improvement += 1
+                #else:
+                    #no_improvement += 1
             
             # Print training progress
             print(f"Epoch {epoch} | Train Loss: {epoch_loss:.6f} | Test Loss: {test_loss:.6f} | LR: {optimizer.param_groups[0]['lr']:.6f}")
