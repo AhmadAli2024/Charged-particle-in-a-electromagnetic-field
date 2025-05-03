@@ -3,6 +3,7 @@ import os
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -30,22 +31,25 @@ class NICECouplingLayer(nn.Module):
         return torch.cat([x1, x2], dim=1)
 
 class ExtendedSympNet(nn.Module):
-    def __init__(self, latent_dim, active_dim=4, hidden_dim=50, dropout=0.5):
+    def __init__(self, latent_dim, active_dim=4, hidden_dim=128, dropout=0.5):
         super().__init__()
         self.active_dim = active_dim
         self.latent_dim = latent_dim
 
         self.H_net = nn.Sequential(
             nn.Linear(latent_dim, hidden_dim),
-            nn.Tanh(),  
+            nn.Tanh(),
             nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),  
+            nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),  
+            nn.Tanh(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
             nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),  
+            nn.Tanh(),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, 1)
         )
 
@@ -54,36 +58,95 @@ class ExtendedSympNet(nn.Module):
         self.dt_p = nn.Parameter(torch.randn(1, device=device) * 0.1 + 0.5)
         self.alpha = nn.Parameter(torch.tensor(0.01, device=device))
 
-    def forward(self, z, dt=0.1):
-        # Maintain gradient flow
-        z = z.clone().requires_grad_(True)
-        z_active = z[:, :self.active_dim]
+#    def forward(self, z, dt=0.1):
+#        # Maintain gradient flow
+#        z = z.clone().requires_grad_(True)
+#        z_active = z[:, :self.active_dim]
+#
+#        # Split components with gradient tracking
+#        z1 = z_active[:, :2].requires_grad_(True)
+#        z2 = z_active[:, 2:].requires_grad_(True)
+#        z_aux = z[:, self.active_dim:]
+#
+#
+#        # Compute Hamiltonian
+#        z_combined = torch.cat([z1, z2, z_aux], dim=1)
+#        H = self.H_net(z_combined).squeeze(-1)
+#
+#
+#        # Calculate gradients
+#        dHdz1 = torch.autograd.grad(H, z1, grad_outputs=torch.ones_like(H), create_graph=True)[0]
+#        dHdz2 = torch.autograd.grad(H, z2, grad_outputs=torch.ones_like(H), create_graph=True)[0]
+#
+#
+#        # Symplectic update
+#        S = self.S - self.S.t()
+#        dz1 = dHdz2 * self.dt_q + self.alpha * (z_active @ S.t())[:, :2]
+#        dz2 = -dHdz1 * self.dt_p + self.alpha * (z_active @ S)[:, 2:]
+#
+#        z_active_new = z_active + dt * torch.cat([dz1, dz2], dim=1)
+#
+#
+#        return torch.cat([z_active_new, z_aux], dim=1)
 
-        # Split components with gradient tracking
+
+    def verlet_step(self,z, dt, H_net, S, alpha, active_dim, dt_q, dt_p):
+        z = z.clone().requires_grad_(True)
+        z_active = z[:, :active_dim]
         z1 = z_active[:, :2].requires_grad_(True)
         z2 = z_active[:, 2:].requires_grad_(True)
-        z_aux = z[:, self.active_dim:]
+        z_aux = z[:, active_dim:]
 
-
-        # Compute Hamiltonian
+        # Compute Hamiltonian and gradients
         z_combined = torch.cat([z1, z2, z_aux], dim=1)
-        H = self.H_net(z_combined).squeeze(-1)
-
-
-        # Calculate gradients
+        H = H_net(z_combined).squeeze(-1)
         dHdz1 = torch.autograd.grad(H, z1, grad_outputs=torch.ones_like(H), create_graph=True)[0]
         dHdz2 = torch.autograd.grad(H, z2, grad_outputs=torch.ones_like(H), create_graph=True)[0]
 
+        # Half-step for z2 (p)
+        dz2_half = -dHdz1 * (dt/2) * dt_p + alpha * (z_active @ S)[:, 2:] * (dt/2)
+        z2_new = z2 + dz2_half
 
-        # Symplectic update
-        S = self.S - self.S.t()
-        dz1 = dHdz2 * self.dt_q + self.alpha * (z_active @ S.t())[:, :2]
-        dz2 = -dHdz1 * self.dt_p + self.alpha * (z_active @ S)[:, 2:]
+        # Full-step for z1 (q)
+        dz1_full = dHdz2 * dt * dt_q + alpha * (z_active @ S.t())[:, :2] * dt
+        z1_new = z1 + dz1_full
 
-        z_active_new = z_active + dt * torch.cat([dz1, dz2], dim=1)
+        # Another half-step for z2 (p)
+        z_active_half = torch.cat([z1_new, z2_new], dim=1)
+        z_combined_half = torch.cat([z1_new, z2_new, z_aux], dim=1)
+        H_half = H_net(z_combined_half).squeeze(-1)
+        dHdz1_half = torch.autograd.grad(H_half, z1_new, grad_outputs=torch.ones_like(H_half), create_graph=True)[0]
+        dz2_half2 = -dHdz1_half * (dt/2) * dt_p + alpha * (z_active_half @ S)[:, 2:] * (dt/2)
+        z2_final = z2_new + dz2_half2
+
+        z_active_final = torch.cat([z1_new, z2_final], dim=1)
+        return torch.cat([z_active_final, z_aux], dim=1)
 
 
-        return torch.cat([z_active_new, z_aux], dim=1)
+    def suzuki_4th_order(self,z, dt, H_net, S, alpha, active_dim, dt_q, dt_p):
+        # Suzuki's coefficients
+        a1 = 1.0 / (4 - 4**(1/3))
+        a2 = a1
+        a3 = 1 - 4 * a1
+        a4 = a1
+        a5 = a1
+
+        # Apply composition
+        z = self.verlet_step(z, a1 * dt, H_net, S, alpha, active_dim, dt_q, dt_p)
+        z = self.verlet_step(z, a2 * dt, H_net, S, alpha, active_dim, dt_q, dt_p)
+        z = self.verlet_step(z, a3 * dt, H_net, S, alpha, active_dim, dt_q, dt_p)
+        z = self.verlet_step(z, a4 * dt, H_net, S, alpha, active_dim, dt_q, dt_p)
+        z = self.verlet_step(z, a5 * dt, H_net, S, alpha, active_dim, dt_q, dt_p)
+
+        return z
+
+    def forward(self, z, dt=0.1):
+        return self.suzuki_4th_order(
+            z, dt, 
+            self.H_net, self.S, self.alpha, 
+            self.active_dim, self.dt_q, self.dt_p
+        )
+
 
     def enforce_symplecticity(self):
         with torch.no_grad():
@@ -138,20 +201,28 @@ def load_data():
 
     return train_data, trainP_data, test_data
 
-def train(model, X_train, y_train, X_test, epochs=500000, lr=0.002):
+def train(model, X_train, y_train, X_test, epochs=500000, lr=0.0005):
 
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
-    optimizer = torch.optim.AdamW(
+    optimizer = torch.optim.Adam(
         model.parameters(),
         lr=lr,              # or your specific learning rate
-        weight_decay=1e-5,    # small weight decay for stability
         betas=(0.9, 0.999),   # default AdamW momentum settings
         eps=1e-8              # numerical stability
     )
 
     best_loss = float('inf')
-    batch_size = 512 
+    batch_size = 512
+
+    # Learning rate scheduler
+    scheduler = ReduceLROnPlateau(
+    optimizer,
+    mode='min',
+    factor=0.5,
+    patience=5,
+    min_lr=0.00001 # or whatever lower bound you want
+    )
     
     for epoch in range(epochs):
         model.train()
@@ -176,28 +247,25 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.002):
             epoch_loss += loss.item()
         
         # Enforce symplecticity
-        if epoch % 50 == 0:
+        if epoch % 100 == 0:
             model.sympNet.enforce_symplecticity()
 
-        if epoch % 2000 == 0:
-            if lr >= 0.0005:
-                lr*=0.8
-
-
-
-        
         # Validation
         if epoch % 100 == 0:
             model.eval()
             with torch.no_grad():
                 test_loss = evaluate(model, X_test)
-                
+                scheduler.step(test_loss)
+
                 if test_loss < best_loss:
                     best_loss = test_loss
-                    torch.save(model.state_dict(), 'best_model.pth')
-                    plot(X_test,model.predict(X_test[0:1].clone().to(device),299))
-                    print("plotted")
-                    
+                    torch.save(model.state_dict(), "best_model.pth")
+                    pred_trajectory = model.predict(X_test[0:1].clone().to(device), 299)
+                    mse_T = F.mse_loss(pred_trajectory,X_test[:300],reduction='none').mean(dim=1)
+                    plotMSE(mse_T,save_path=f'MSE_{epoch}.png')
+                    plot(X_test[:300], pred_trajectory, save_path=f'trajectory_epoch_{epoch}.png')
+                    print(f"New best model saved. Test Loss: {test_loss:.6f}")
+                
             print(f"Epoch {epoch} | Train Loss: {epoch_loss:.6f} | Test Loss: {test_loss:.6f} | LR: {lr}")
 
 
@@ -248,6 +316,32 @@ def plot(ground_truth, predicted_trajectory, save_path='test.png', show=True):
     plt.savefig(save_path)
     if show:
         plt.show()
+    plt.close()
+
+def plotMSE(loss, save_path='test.png', show=True):
+    """Plot the ground truth vs predicted trajectory"""
+    if os.path.exists(save_path):
+        os.remove(save_path)
+        
+    plt.figure(figsize=(8, 6))
+    
+    t = torch.arange(len(loss))
+
+    plt.plot(t.numpy(),loss.cpu().numpy())
+    plt.xlabel("Step(0.1 Seconds)")
+    plt.ylabel("MSE Loss")
+    plt.title("MSE Vs Time")
+
+    
+    try:
+        plt.savefig(save_path)
+        print(f"Plot saved to {save_path}")
+    except Exception as e:
+        print(f"Error saving plot: {e}")
+    
+    if show:
+        plt.show()
+    
     plt.close()
 
 if __name__ == "__main__":
