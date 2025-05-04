@@ -3,9 +3,12 @@ import os
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import numpy as np
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from tqdm import tqdm
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 
 class NICECouplingLayer(nn.Module):
     def __init__(self, dim, hidden_dim):
@@ -42,21 +45,30 @@ class ExtendedSympNet(nn.Module):
             nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
             nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
             nn.Dropout(0.2),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
             nn.Linear(hidden_dim, 1)
         )
 
-        self.S = nn.Parameter(torch.zeros(active_dim, active_dim, device=device))
+        self.W = nn.Parameter(torch.randn(active_dim, active_dim, device=device) * 0.01)
+        self.register_buffer('S', None)  # Will be computed as W - W.T
+
         self.dt_q = nn.Parameter(torch.randn(1, device=device) * 0.1 + 0.5)
         self.dt_p = nn.Parameter(torch.randn(1, device=device) * 0.1 + 0.5)
         self.alpha = nn.Parameter(torch.tensor(0.01, device=device))
+
+#    def forward(self, z, dt=0.1):
+
 
 #    def forward(self, z, dt=0.1):
 #        # Maintain gradient flow
@@ -90,62 +102,56 @@ class ExtendedSympNet(nn.Module):
 #        return torch.cat([z_active_new, z_aux], dim=1)
 
 
-    def verlet_step(self,z, dt, H_net, S, alpha, active_dim, dt_q, dt_p):
-        z = z.clone().requires_grad_(True)
-        z_active = z[:, :active_dim]
-        z1 = z_active[:, :2].requires_grad_(True)
-        z2 = z_active[:, 2:].requires_grad_(True)
-        z_aux = z[:, active_dim:]
+#    def verlet_step(self,z, dt):
+#        self.S = self.W - self.W.t()  # Ensure skew-symmetry
+#        
+#        z = z.clone().requires_grad_(True)
+#        z_active = z[:, :self.active_dim]
+#        q = z_active[:, :2].requires_grad_(True)
+#        p = z_active[:, 2:].requires_grad_(True)
+#        z_aux = z[:, self.active_dim:]
+#
+#        # Compute Hamiltonian and gradients
+#        z_combined = torch.cat([q, p, z_aux], dim=1)
+#        H = self.H_net(z_combined).squeeze(-1)
+#        
+#        dHdq = torch.autograd.grad(H, q, grad_outputs=torch.ones_like(H), create_graph=True)[0]
+#        dHdp = torch.autograd.grad(H, p, grad_outputs=torch.ones_like(H), create_graph=True)[0]
+#
+#        # Symplectic updates with learned parameters
+#        # Half-step for momentum
+#        p_half = p - (dt/2) * self.dt_p * dHdq + (dt/2) * self.alpha * (z_active @ self.S)[:, 2:]
+#        
+#        # Full-step for position
+#        q_full = q + dt * self.dt_q * dHdp + dt * self.alpha * (z_active @ self.S.t())[:, :2]
+#        
+#        # Another half-step for momentum
+#        z_active_half = torch.cat([q_full, p_half], dim=1)
+#        z_combined_half = torch.cat([q_full, p_half, z_aux], dim=1)
+#        H_half = self.H_net(z_combined_half).squeeze(-1)
+#        dHdq_half = torch.autograd.grad(H_half, q_full, grad_outputs=torch.ones_like(H_half), create_graph=True)[0]
+#        
+#        p_full = p_half - (dt/2) * self.dt_p * dHdq_half + (dt/2) * self.alpha * (z_active_half @ self.S)[:, 2:]
+#
+#        z_active_final = torch.cat([q_full, p_full], dim=1)
+#        return torch.cat([z_active_final, z_aux], dim=1)
 
-        # Compute Hamiltonian and gradients
-        z_combined = torch.cat([z1, z2, z_aux], dim=1)
-        H = H_net(z_combined).squeeze(-1)
-        dHdz1 = torch.autograd.grad(H, z1, grad_outputs=torch.ones_like(H), create_graph=True)[0]
-        dHdz2 = torch.autograd.grad(H, z2, grad_outputs=torch.ones_like(H), create_graph=True)[0]
 
-        # Half-step for z2 (p)
-        dz2_half = -dHdz1 * (dt/2) * dt_p + alpha * (z_active @ S)[:, 2:] * (dt/2)
-        z2_new = z2 + dz2_half
+#    def suzuki_4th_order(self,z, dt):
+#        # Coefficients for symmetric composition
+#        s = (4 ** (1/3))
+#        a1 = 1/(2*(2 - s))
+#        a2 = (1 - s)/(2*(2 - s))
+#        
+#        z = self.verlet_step(z, a1*dt)
+#        z = self.verlet_step(z, a1*dt)
+#        z = self.verlet_step(z, a2*dt)
+#        z = self.verlet_step(z, a1*dt)
+#        z = self.verlet_step(z, a1*dt)
+#        return z
 
-        # Full-step for z1 (q)
-        dz1_full = dHdz2 * dt * dt_q + alpha * (z_active @ S.t())[:, :2] * dt
-        z1_new = z1 + dz1_full
-
-        # Another half-step for z2 (p)
-        z_active_half = torch.cat([z1_new, z2_new], dim=1)
-        z_combined_half = torch.cat([z1_new, z2_new, z_aux], dim=1)
-        H_half = H_net(z_combined_half).squeeze(-1)
-        dHdz1_half = torch.autograd.grad(H_half, z1_new, grad_outputs=torch.ones_like(H_half), create_graph=True)[0]
-        dz2_half2 = -dHdz1_half * (dt/2) * dt_p + alpha * (z_active_half @ S)[:, 2:] * (dt/2)
-        z2_final = z2_new + dz2_half2
-
-        z_active_final = torch.cat([z1_new, z2_final], dim=1)
-        return torch.cat([z_active_final, z_aux], dim=1)
-
-
-    def suzuki_4th_order(self,z, dt, H_net, S, alpha, active_dim, dt_q, dt_p):
-        # Suzuki's coefficients
-        a1 = 1.0 / (4 - 4**(1/3))
-        a2 = a1
-        a3 = 1 - 4 * a1
-        a4 = a1
-        a5 = a1
-
-        # Apply composition
-        z = self.verlet_step(z, a1 * dt, H_net, S, alpha, active_dim, dt_q, dt_p)
-        z = self.verlet_step(z, a2 * dt, H_net, S, alpha, active_dim, dt_q, dt_p)
-        z = self.verlet_step(z, a3 * dt, H_net, S, alpha, active_dim, dt_q, dt_p)
-        z = self.verlet_step(z, a4 * dt, H_net, S, alpha, active_dim, dt_q, dt_p)
-        z = self.verlet_step(z, a5 * dt, H_net, S, alpha, active_dim, dt_q, dt_p)
-
-        return z
-
-    def forward(self, z, dt=0.1):
-        return self.suzuki_4th_order(
-            z, dt, 
-            self.H_net, self.S, self.alpha, 
-            self.active_dim, self.dt_q, self.dt_p
-        )
+#    def forward(self, z, dt=0.1):
+#        return self.suzuki_4th_order(z, dt)
 
 
     def enforce_symplecticity(self):
@@ -181,27 +187,46 @@ class PNN(nn.Module):
             
         return torch.stack(trajectory)
 
+#def load_data():
+#    # Load training data
+#    with open('../../data/train.txt', 'r') as f:
+#        train_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
+#    
+#    # Load testing data
+#    with open('../../data/test.txt', 'r') as f:
+#        test_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
+#
+#    # Process data
+#    train_data = torch.tensor(train_lines[:1200], dtype=torch.float32)
+#    trainP_data = torch.tensor(train_lines[1:1201], dtype=torch.float32)
+#    test_data = torch.tensor(test_lines[:300], dtype=torch.float32)
+#    
+#    train_data = torch.nn.functional.normalize(train_data, p=2, dim=1)
+#    test_data = torch.nn.functional.normalize(test_data, p=2, dim=1)
+#    trainP_data = torch.nn.functional.normalize(trainP_data, p=2, dim=1)
+#
+#    return train_data, trainP_data, test_data
+
+
 def load_data():
-    # Load training data
+    # Load and normalize data with feature-wise standardization
+    def process_data(lines):
+        data = torch.tensor([list(map(float, line.strip().split())) for line in lines if line.strip()])
+        means = data.mean(dim=0)
+        stds = data.std(dim=0)
+        return (data - means) / (stds + 1e-8)
+
     with open('../../data/train.txt', 'r') as f:
-        train_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
-    
-    # Load testing data
+        train_data = process_data(f.readlines()[:1200])
+        
     with open('../../data/test.txt', 'r') as f:
-        test_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
+        test_data = process_data(f.readlines()[:300])
 
-    # Process data
-    train_data = torch.tensor(train_lines[:1200], dtype=torch.float32)
-    trainP_data = torch.tensor(train_lines[1:1201], dtype=torch.float32)
-    test_data = torch.tensor(test_lines[:300], dtype=torch.float32)
-    
-    train_data = torch.nn.functional.normalize(train_data, p=2, dim=1)
-    test_data = torch.nn.functional.normalize(test_data, p=2, dim=1)
-    trainP_data = torch.nn.functional.normalize(trainP_data, p=2, dim=1)
+    # Create shifted targets for training
+    return (train_data[:-1], train_data[1:], test_data)
 
-    return train_data, trainP_data, test_data
 
-def train(model, X_train, y_train, X_test, epochs=500000, lr=0.0005):
+def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
 
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
@@ -213,7 +238,8 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.0005):
     )
 
     best_loss = float('inf')
-    batch_size = 512
+    no_improve = 0
+    batch_size = 128
 
     # Learning rate scheduler
     scheduler = ReduceLROnPlateau(
@@ -221,10 +247,10 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.0005):
     mode='min',
     factor=0.5,
     patience=5,
-    min_lr=0.00001 # or whatever lower bound you want
+    min_lr=1e-6
     )
     
-    for epoch in range(epochs):
+    for epoch in (pbar := tqdm(range(epochs))):
         model.train()
         epoch_loss = 0
         
@@ -264,9 +290,12 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.0005):
                     mse_T = F.mse_loss(pred_trajectory,X_test[:300],reduction='none').mean(dim=1)
                     plotMSE(mse_T,save_path=f'MSE_{epoch}.png')
                     plot(X_test[:300], pred_trajectory, save_path=f'trajectory_epoch_{epoch}.png')
-                    print(f"New best model saved. Test Loss: {test_loss:.6f}")
                 
-            print(f"Epoch {epoch} | Train Loss: {epoch_loss:.6f} | Test Loss: {test_loss:.6f} | LR: {lr}")
+            pbar.set_description(f"Epoch {epoch} | "
+                                 f"Train Loss: {epoch_loss:.6f} | "
+                                 f"Test Loss: {test_loss:.3e} | "
+                                 f"LR: {lr:.6f} | "
+                                 f"PB: {best_loss:.6f}")
 
 
 def evaluate(model, X_test, steps=300):
@@ -335,9 +364,10 @@ def plotMSE(loss, save_path='test.png', show=True):
     
     try:
         plt.savefig(save_path)
-        print(f"Plot saved to {save_path}")
+        #print(f"Plot saved to {save_path}")
     except Exception as e:
-        print(f"Error saving plot: {e}")
+        pass
+        #print(f"Error saving plot: {e}")
     
     if show:
         plt.show()
@@ -345,7 +375,9 @@ def plotMSE(loss, save_path='test.png', show=True):
     plt.close()
 
 if __name__ == "__main__":
-    X_train, y_train, X_test = load_data()
-    model = PNN().to(device)
-    X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
-    train(model, X_train, y_train, X_test)
+    test = GradientUp(4,128)
+    test.forward(torch.tensor([[1,2,3,4]]))
+    #X_train, y_train, X_test = load_data()
+    #model = PNN().to(device)
+    #X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
+    #train(model, X_train, y_train, X_test)

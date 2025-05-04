@@ -3,19 +3,78 @@ import os
 import torch.nn as nn
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import numpy as np
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+class SigmaBlock(nn.Module):
+    def __init__(self, d, c_dim, l, nonlinearity=torch.tanh):
+        super().__init__()
+        self.K1 = nn.Linear(d, l, bias=False)
+        self.K2 = nn.Linear(c_dim, l, bias=False)
+        self.b = nn.Parameter(torch.zeros(l))
+        self.a = nn.Parameter(torch.ones(l))
+        self.nonlinearity = nonlinearity
+        self.output_proj = nn.Linear(l, d, bias=False)
+
+    def forward(self, x, c):
+        # x: (batch, d), c: (batch, c_dim)
+        h = self.K1(x) + self.K2(c) + self.b  # (batch, l)
+        h = self.nonlinearity(h)             # (batch, l)
+        h = self.a * h                       # (batch, l)
+        out = self.output_proj(h)            # (batch, d)
+        return out
+
+class EUp(nn.Module):
+    def __init__(self, d, c_dim, l, nonlinearity=torch.tanh):
+        super().__init__()
+        self.sigma = SigmaBlock(d, c_dim, l, nonlinearity)
+
+    def forward(self, p, q, c):
+        delta = self.sigma(q, c)
+        return p + delta, q, c
+
+class ELow(nn.Module):
+    def __init__(self, d, c_dim, l, nonlinearity=torch.tanh):
+        super().__init__()
+        self.sigma = SigmaBlock(d, c_dim, l, nonlinearity)
+
+    def forward(self, p, q, c):
+        delta = self.sigma(p, c)
+        return p, q + delta, c
+
+class ExtendedSympNet(nn.Module):
+    def __init__(self, d, c_dim, l, depth, nonlinearity=nn.Tanh()):
+        super().__init__()
+        layers = []
+        for i in range(depth):
+            if i % 2 == 0:
+                layers.append(EUp(d, c_dim, l, nonlinearity))
+            else:
+                layers.append(ELow(d, c_dim, l, nonlinearity))
+        self.layers = nn.ModuleList(layers)
+
+    def forward(self, x):
+        # Split input into p, q, c
+        d = (x.shape[1] - self.layers[0].sigma.K2.in_features) // 2
+        p, q, c = x[:, :d], x[:, d:2*d], x[:, 2*d:]
+
+        for layer in self.layers:
+            p, q, c = layer(p, q, c)
+
+        return torch.cat([p, q, c], dim=1)
+
 
 class NICECouplingLayer(nn.Module):
     def __init__(self, dim, hidden_dim):
         super().__init__()
         self.m1 = nn.Sequential(
             nn.Linear(dim//2, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
+            nn.Tanh(),
             nn.Linear(hidden_dim, dim//2)
         )
 
@@ -31,227 +90,224 @@ class NICECouplingLayer(nn.Module):
         x2 = y2 - self.m1(y1)
         return torch.cat([x1, x2], dim=1)
 
-class ExtendedSympNet(nn.Module):
-    def __init__(self, latent_dim, active_dim=4, hidden_dim=128, dropout=0.2):
-        super().__init__()
-        self.active_dim = active_dim
-        self.latent_dim = latent_dim
-
-        # Hamiltonian network with residual connections
-        self.H_net = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
-            nn.SiLU(),
-            self._make_residual_block(hidden_dim, dropout),
-            self._make_residual_block(hidden_dim, dropout),
-            nn.Linear(hidden_dim, 1)
-        )
-        
-        # Skew-symmetric matrix parameterization
-        self.W = nn.Parameter(torch.randn(active_dim, active_dim, device=device) * 0.01
-        self.register_buffer('S', None)  # Will be computed as W - W.T
-        
-        # Learnable parameters with proper initialization
-        self.dt_q = nn.Parameter(torch.randn(1, device=device) * 0.1 + 0.5)
-        self.dt_p = nn.Parameter(torch.randn(1, device=device) * 0.1 + 0.5)
-        self.alpha = nn.Parameter(torch.tensor(0.01, device=device))
-
-    def _make_residual_block(self, hidden_dim, dropout):
-        return nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU()
-        )
-
-    def verlet_step(self, z, dt):
-        self.S = self.W - self.W.t()  # Ensure skew-symmetry
-        
-        z = z.clone().requires_grad_(True)
-        z_active = z[:, :self.active_dim]
-        q = z_active[:, :2].requires_grad_(True)
-        p = z_active[:, 2:].requires_grad_(True)
-        z_aux = z[:, self.active_dim:]
-
-        # Compute Hamiltonian and gradients
-        z_combined = torch.cat([q, p, z_aux], dim=1)
-        H = self.H_net(z_combined).squeeze(-1)
-        
-        dHdq = torch.autograd.grad(H, q, grad_outputs=torch.ones_like(H), create_graph=True)[0]
-        dHdp = torch.autograd.grad(H, p, grad_outputs=torch.ones_like(H), create_graph=True)[0]
-
-        # Symplectic updates with learned parameters
-        # Half-step for momentum
-        p_half = p - (dt/2) * self.dt_p * dHdq + (dt/2) * self.alpha * (z_active @ self.S)[:, 2:]
-        
-        # Full-step for position
-        q_full = q + dt * self.dt_q * dHdp + dt * self.alpha * (z_active @ self.S.t())[:, :2]
-        
-        # Another half-step for momentum
-        z_active_half = torch.cat([q_full, p_half], dim=1)
-        z_combined_half = torch.cat([q_full, p_half, z_aux], dim=1)
-        H_half = self.H_net(z_combined_half).squeeze(-1)
-        dHdq_half = torch.autograd.grad(H_half, q_full, grad_outputs=torch.ones_like(H_half), create_graph=True)[0]
-        
-        p_full = p_half - (dt/2) * self.dt_p * dHdq_half + (dt/2) * self.alpha * (z_active_half @ self.S)[:, 2:]
-
-        z_active_final = torch.cat([q_full, p_full], dim=1)
-        return torch.cat([z_active_final, z_aux], dim=1)
-
-    def suzuki_4th_order(self, z, dt):
-        # Coefficients for symmetric composition
-        s = (4 ** (1/3))
-        a1 = 1/(2*(2 - s))
-        a2 = (1 - s)/(2*(2 - s))
-        
-        z = self.verlet_step(z, a1*dt)
-        z = self.verlet_step(z, a1*dt)
-        z = self.verlet_step(z, a2*dt)
-        z = self.verlet_step(z, a1*dt)
-        z = self.verlet_step(z, a1*dt)
-        return z
-
-    def forward(self, z, dt=0.1):
-        return self.suzuki_4th_order(z, dt)
 
 class PNN(nn.Module):
     def __init__(self):
         super().__init__()
-        self.transformer = NICECouplingLayer(4, 128)
-        self.sympNet = ExtendedSympNet(4, hidden_dim=256)
-        self.best_loss = float('inf')
+        self.transformer = NICECouplingLayer(4, 64)
+        self.sympNet = ExtendedSympNet(d=2, c_dim=0, l=128, depth=6)
+        self.lowestLoss = float('inf')
 
     def forward(self, x):
         x = x.clone().requires_grad_(True)
-        theta = self.transformer(x)
+        theta = self.transformer.forward(x)
         phi = self.sympNet(theta)
         return self.transformer.inverse(phi)
 
-    @torch.inference_mode()
+
     def predict(self, x, steps):
-        trajectory = [x[0].clone()]
+        trajectory = [x.detach()[0]]
         current = x.clone()
         
         for _ in range(steps):
-            current = self.forward(current)
-            trajectory.append(current[0].clone())
+            with torch.enable_grad():  # Enable gradients temporarily
+                current = current.requires_grad_(True)
+                next_step = self.forward(current)
+            trajectory.append(next_step.detach()[0])
+            current = next_step.detach()
             
         return torch.stack(trajectory)
 
 def load_data():
-    # Load and normalize data with feature-wise standardization
-    def process_data(lines):
-        data = torch.tensor([list(map(float, line.strip().split())) for line in lines if line.strip()])
-        means = data.mean(dim=0)
-        stds = data.std(dim=0)
-        return (data - means) / (stds + 1e-8)
-
+    # Load training data
     with open('../../data/train.txt', 'r') as f:
-        train_data = process_data(f.readlines()[:1200])
-        
+        train_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
+    
+    # Load testing data
     with open('../../data/test.txt', 'r') as f:
-        test_data = process_data(f.readlines()[:300])
+        test_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
 
-    # Create shifted targets for training
-    return (train_data[:-1], train_data[1:], test_data)
+    # Process data
+    train_data = torch.tensor(train_lines[:1200], dtype=torch.float32)
+    trainP_data = torch.tensor(train_lines[1:1201], dtype=torch.float32)
+    test_data = torch.tensor(test_lines[:300], dtype=torch.float32)
+    
+    train_data = torch.nn.functional.normalize(train_data, p=2, dim=1)
+    test_data = torch.nn.functional.normalize(test_data, p=2, dim=1)
+    trainP_data = torch.nn.functional.normalize(trainP_data, p=2, dim=1)
 
-def train(model, X_train, y_train, X_test, epochs=100000, lr=0.001):
+    return train_data, trainP_data, test_data
+
+
+#def load_data():
+#    # Load and normalize data with feature-wise standardization
+#    def process_data(lines):
+#        data = torch.tensor([list(map(float, line.strip().split())) for line in lines if line.strip()])
+#        means = data.mean(dim=0)
+#        stds = data.std(dim=0)
+#        return (data - means) / (stds + 1e-8)
+#
+#    with open('../../data/train.txt', 'r') as f:
+#        train_data = process_data(f.readlines()[:1200])
+#        
+#    with open('../../data/test.txt', 'r') as f:
+#        test_data = process_data(f.readlines()[:300])
+#
+#    # Create shifted targets for training
+#    return (train_data[:-1], train_data[1:], test_data)
+
+
+def train(model, X_train, y_train, X_test, epochs=500000, lr=0.01):
+
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
-    
     optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=lr,
-        weight_decay=0.01
+        lr=lr,              # or your specific learning rate
+        betas=(0.9, 0.999),   # default AdamW momentum settings
+        eps=1e-8              # numerical stability
     )
-    
-    scheduler = ReduceLROnPlateau(
-        optimizer,
-        mode='min',
-        factor=0.5,
-        patience=10,
-        min_lr=1e-6
-    )
-    
+
     best_loss = float('inf')
     no_improve = 0
     batch_size = 128
+
+    # Learning rate scheduler
+    scheduler = ReduceLROnPlateau(
+    optimizer,
+    mode='min',
+    factor=0.8,
+    patience=5,
+    min_lr=1e-6
+    )
     
     for epoch in (pbar := tqdm(range(epochs))):
         model.train()
-        perm = torch.randperm(len(X_train))
-        total_loss = 0
+        epoch_loss = 0
         
-        # Curriculum learning: gradually increase prediction horizon
-        unroll_steps = 1 + (epoch // 500)
+        # Shuffle data
+        perm = torch.randperm(len(X_train))
+        X_train, y_train = X_train[perm], y_train[perm]
         
         for i in range(0, len(X_train), batch_size):
+            X_batch = X_train[i:i+batch_size].requires_grad_(True)
+            y_batch = y_train[i:i+batch_size]
+            
             optimizer.zero_grad()
-            
-            # Multi-step unrolling for better temporal consistency
-            current = X_train[perm[i:i+batch_size]]
-            loss = 0
-            
-            for step in range(unroll_steps):
-                pred = model(current)
-                loss += F.mse_loss(pred, y_train[perm[i:i+batch_size] if step == 0 else current)
-                current = pred.detach().requires_grad_(True)
+            pred = model(X_batch)
+            loss = F.mse_loss(pred, y_batch)
             
             loss.backward()
-            nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            total_loss += loss.item()
+            
+            epoch_loss += loss.item()
         
-        # Validation and early stopping
-        if epoch % 50 == 0:
+        # Enforce symplecticity
+        if epoch % 100 == 0:
+            pass
+            #model.sympNet.enforce_symplecticity()
+
+        # Validation
+        if epoch % 100 == 0:
             model.eval()
             with torch.no_grad():
-                test_pred = model.predict(X_test[:1], 299)
-                test_loss = F.mse_loss(test_pred, X_test[:300]).item()
-                
+                test_loss = evaluate(model, X_test)
                 scheduler.step(test_loss)
-                
+
                 if test_loss < best_loss:
                     best_loss = test_loss
-                    no_improve = 0
                     torch.save(model.state_dict(), "best_model.pth")
-                    
-                    # Visualization
-                    plot(X_test[:300].cpu(), test_pred.cpu(), 
-                         save_path=f'trajectory_epoch_{epoch}.png')
-                else:
-                    no_improve += 50
-                    if no_improve >= 500:
-                        print(f"Early stopping at epoch {epoch}")
-                        break
-            
+                    pred_trajectory = model.predict(X_test[0:1].clone().to(device), 299)
+                    mse_T = F.mse_loss(pred_trajectory,X_test[:300],reduction='none').mean(dim=1)
+                    plotMSE(mse_T,save_path=f'MSE_{epoch}.png')
+                    plot(X_test[:300], pred_trajectory, save_path=f'trajectory_epoch_{epoch}.png')
+                
             pbar.set_description(f"Epoch {epoch} | "
-                                 f"Train Loss: {total_loss/len(X_train):.3e} | "
+                                 f"Train Loss: {epoch_loss:.6f} | "
                                  f"Test Loss: {test_loss:.3e} | "
-                                 f"LR: {optimizer.param_groups[0]['lr']:.2e}")
+                                 f"LR: {optimizer.param_groups[0]['lr']:.6f} | "
+                                 f"PB: {best_loss:.6f}")
 
-def plot(ground_truth, predicted, save_path='trajectory.png'):
-    plt.figure(figsize=(10, 8))
+
+def evaluate(model, X_test, steps=300):
+    model.eval()
+    initial = X_test[0:1].clone().to(device)
+    ground_truth = X_test[:steps+1].cpu()
     
-    # Phase space plots
-    for i, (label, dims) in enumerate(zip(
-        ['Phase Space (q)', 'Phase Space (p)'],
-        [(0, 1), (2, 3)]
-    )):
-        plt.subplot(2, 1, i+1)
-        plt.plot(ground_truth[:, dims[0]], ground_truth[:, dims[1]], 'b-', label='Truth')
-        plt.plot(predicted[:, dims[0]], predicted[:, dims[1]], 'r--', label='Predicted')
-        plt.xlabel(f'Dimension {dims[0]+1}')
-        plt.ylabel(f'Dimension {dims[1]+1}')
-        plt.title(label)
-        plt.legend()
-        plt.grid(True)
+    with torch.no_grad():
+        # Enable gradients temporarily for physics calculations
+        with torch.enable_grad():
+            predicted = model.predict(initial, steps-1).cpu()
     
+    return F.mse_loss(predicted, ground_truth).sum()
+
+
+def plot(ground_truth, predicted_trajectory, save_path='test.png', show=True):
+    if os.path.exists(save_path):
+        os.remove(save_path)
+    plt.figure(figsize=(8, 6))
+
+    # Ground truth trajectory
+    plt.plot(
+        ground_truth[:, 2].cpu().numpy(), ground_truth[:, 3].cpu().numpy(),
+        'b-', label='Ground Truth', linewidth=2
+    )
+
+    # Predicted trajectory
+    plt.plot(
+        predicted_trajectory[:, 2].cpu().detach().numpy(), predicted_trajectory[:, 3].cpu().detach().numpy(),
+        'r--', label='PNN Prediction', linewidth=2
+    )
+
+    # Start point
+    plt.scatter(
+        ground_truth[0, 2].cpu().numpy(), ground_truth[0, 3].cpu().numpy(),
+        c='green', s=100, label='Start Point'
+    )
+
+    plt.xlabel('Position $x_1$', fontsize=14)
+    plt.ylabel('Position $x_2$', fontsize=14)
+    plt.title('Charged Particle Trajectory Prediction', fontsize=16)
+    plt.legend(fontsize=12)
+    plt.grid(True)
+    plt.axis('equal')  # Maintains spatial proportions
+
     plt.tight_layout()
     plt.savefig(save_path)
+    if show:
+        plt.show()
+    plt.close()
+
+def plotMSE(loss, save_path='test.png', show=True):
+    """Plot the ground truth vs predicted trajectory"""
+    if os.path.exists(save_path):
+        os.remove(save_path)
+        
+    plt.figure(figsize=(8, 6))
+    
+    t = torch.arange(len(loss))
+
+    plt.plot(t.numpy(),loss.cpu().numpy())
+    plt.xlabel("Step(0.1 Seconds)")
+    plt.ylabel("MSE Loss")
+    plt.title("MSE Vs Time")
+
+    
+    try:
+        plt.savefig(save_path)
+        #print(f"Plot saved to {save_path}")
+    except Exception as e:
+        pass
+        #print(f"Error saving plot: {e}")
+    
+    if show:
+        plt.show()
+    
     plt.close()
 
 if __name__ == "__main__":
     X_train, y_train, X_test = load_data()
-    model = PNN()
+    model = PNN().to(device)
+    X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
     train(model, X_train, y_train, X_test)
