@@ -67,6 +67,8 @@ class ExtendedSympNet(nn.Module):
         return torch.cat([p, q, c], dim=1)
 
 
+
+
 class NICECouplingLayer(nn.Module):
     def __init__(self, dim, hidden_dim):
         super().__init__()
@@ -165,6 +167,7 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.01):
         model.parameters(),
         lr=lr,              # or your specific learning rate
         betas=(0.9, 0.999),   # default AdamW momentum settings
+        weight_decay=1e-4,
         eps=1e-8              # numerical stability
     )
 
