@@ -141,24 +141,6 @@ def load_data():
     return train_data, trainP_data, test_data
 
 
-#def load_data():
-#    # Load and normalize data with feature-wise standardization
-#    def process_data(lines):
-#        data = torch.tensor([list(map(float, line.strip().split())) for line in lines if line.strip()])
-#        means = data.mean(dim=0)
-#        stds = data.std(dim=0)
-#        return (data - means) / (stds + 1e-8)
-#
-#    with open('../../data/train.txt', 'r') as f:
-#        train_data = process_data(f.readlines()[:1200])
-#        
-#    with open('../../data/test.txt', 'r') as f:
-#        test_data = process_data(f.readlines()[:300])
-#
-#    # Create shifted targets for training
-#    return (train_data[:-1], train_data[1:], test_data)
-
-
 def train(model, X_train, y_train, X_test, epochs=500000, lr=0.01):
 
     model = model.to(device)
@@ -167,7 +149,7 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.01):
         model.parameters(),
         lr=lr,              # or your specific learning rate
         betas=(0.9, 0.999),   # default AdamW momentum settings
-        weight_decay=1e-4,
+        weight_decay=1e-3,
         eps=1e-8              # numerical stability
     )
 
@@ -179,8 +161,8 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.01):
     scheduler = ReduceLROnPlateau(
     optimizer,
     mode='min',
-    factor=0.8,
-    patience=5,
+    factor=0.7,
+    patience=10,
     min_lr=1e-6
     )
     
