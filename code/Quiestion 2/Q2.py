@@ -9,6 +9,65 @@ from tqdm import tqdm
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+class SigmaBlock(nn.Module):
+    def __init__(self, d, c_dim, l, nonlinearity=torch.tanh):
+        super().__init__()
+        self.K1 = nn.Linear(d, l, bias=False)
+        self.K2 = nn.Linear(c_dim, l, bias=False)
+        self.b = nn.Parameter(torch.zeros(l))
+        self.a = nn.Parameter(torch.ones(l))
+        self.nonlinearity = nonlinearity
+        self.output_proj = nn.Linear(l, d, bias=False)
+
+    def forward(self, x, c):
+        # x: (batch, d), c: (batch, c_dim)
+        h = self.K1(x) + self.K2(c) + self.b  # (batch, l)
+        h = self.nonlinearity(h)             # (batch, l)
+        h = self.a * h                       # (batch, l)
+        out = self.output_proj(h)            # (batch, d)
+        return out
+
+class EUp(nn.Module):
+    def __init__(self, d, c_dim, l, nonlinearity=torch.tanh):
+        super().__init__()
+        self.sigma = SigmaBlock(d, c_dim, l, nonlinearity)
+
+    def forward(self, p, q, c):
+        delta = self.sigma(q, c)
+        return p + delta, q, c
+
+class ELow(nn.Module):
+    def __init__(self, d, c_dim, l, nonlinearity=torch.tanh):
+        super().__init__()
+        self.sigma = SigmaBlock(d, c_dim, l, nonlinearity)
+
+    def forward(self, p, q, c):
+        delta = self.sigma(p, c)
+        return p, q + delta, c
+
+class ExtendedSympNet(nn.Module):
+    def __init__(self, d, c_dim, l, depth, nonlinearity=nn.Tanh()):
+        super().__init__()
+        layers = []
+        for i in range(depth):
+            if i % 2 == 0:
+                layers.append(EUp(d, c_dim, l, nonlinearity))
+            else:
+                layers.append(ELow(d, c_dim, l, nonlinearity))
+        self.layers = nn.ModuleList(layers)
+
+    def forward(self, x):
+        # Split input into p, q, c
+        d = (x.shape[1] - self.layers[0].sigma.K2.in_features) // 2
+        p, q, c = x[:, :d], x[:, d:2*d], x[:, 2*d:]
+
+        for layer in self.layers:
+            p, q, c = layer(p, q, c)
+
+        return torch.cat([p, q, c], dim=1)
+
+
+
 
 class NICECouplingLayer(nn.Module):
     def __init__(self, dim, hidden_dim):
@@ -33,138 +92,12 @@ class NICECouplingLayer(nn.Module):
         x2 = y2 - self.m1(y1)
         return torch.cat([x1, x2], dim=1)
 
-class ExtendedSympNet(nn.Module):
-    def __init__(self, latent_dim, active_dim=4, hidden_dim=128, dropout=0.5):
-        super().__init__()
-        self.active_dim = active_dim
-        self.latent_dim = latent_dim
-
-        self.H_net = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1)
-        )
-
-        self.W = nn.Parameter(torch.randn(active_dim, active_dim, device=device) * 0.01)
-        self.register_buffer('S', None)  # Will be computed as W - W.T
-
-        self.dt_q = nn.Parameter(torch.randn(1, device=device) * 0.1 + 0.5)
-        self.dt_p = nn.Parameter(torch.randn(1, device=device) * 0.1 + 0.5)
-        self.alpha = nn.Parameter(torch.tensor(0.01, device=device))
-
-#    def forward(self, z, dt=0.1):
-
-
-#    def forward(self, z, dt=0.1):
-#        # Maintain gradient flow
-#        z = z.clone().requires_grad_(True)
-#        z_active = z[:, :self.active_dim]
-#
-#        # Split components with gradient tracking
-#        z1 = z_active[:, :2].requires_grad_(True)
-#        z2 = z_active[:, 2:].requires_grad_(True)
-#        z_aux = z[:, self.active_dim:]
-#
-#
-#        # Compute Hamiltonian
-#        z_combined = torch.cat([z1, z2, z_aux], dim=1)
-#        H = self.H_net(z_combined).squeeze(-1)
-#
-#
-#        # Calculate gradients
-#        dHdz1 = torch.autograd.grad(H, z1, grad_outputs=torch.ones_like(H), create_graph=True)[0]
-#        dHdz2 = torch.autograd.grad(H, z2, grad_outputs=torch.ones_like(H), create_graph=True)[0]
-#
-#
-#        # Symplectic update
-#        S = self.S - self.S.t()
-#        dz1 = dHdz2 * self.dt_q + self.alpha * (z_active @ S.t())[:, :2]
-#        dz2 = -dHdz1 * self.dt_p + self.alpha * (z_active @ S)[:, 2:]
-#
-#        z_active_new = z_active + dt * torch.cat([dz1, dz2], dim=1)
-#
-#
-#        return torch.cat([z_active_new, z_aux], dim=1)
-
-
-#    def verlet_step(self,z, dt):
-#        self.S = self.W - self.W.t()  # Ensure skew-symmetry
-#        
-#        z = z.clone().requires_grad_(True)
-#        z_active = z[:, :self.active_dim]
-#        q = z_active[:, :2].requires_grad_(True)
-#        p = z_active[:, 2:].requires_grad_(True)
-#        z_aux = z[:, self.active_dim:]
-#
-#        # Compute Hamiltonian and gradients
-#        z_combined = torch.cat([q, p, z_aux], dim=1)
-#        H = self.H_net(z_combined).squeeze(-1)
-#        
-#        dHdq = torch.autograd.grad(H, q, grad_outputs=torch.ones_like(H), create_graph=True)[0]
-#        dHdp = torch.autograd.grad(H, p, grad_outputs=torch.ones_like(H), create_graph=True)[0]
-#
-#        # Symplectic updates with learned parameters
-#        # Half-step for momentum
-#        p_half = p - (dt/2) * self.dt_p * dHdq + (dt/2) * self.alpha * (z_active @ self.S)[:, 2:]
-#        
-#        # Full-step for position
-#        q_full = q + dt * self.dt_q * dHdp + dt * self.alpha * (z_active @ self.S.t())[:, :2]
-#        
-#        # Another half-step for momentum
-#        z_active_half = torch.cat([q_full, p_half], dim=1)
-#        z_combined_half = torch.cat([q_full, p_half, z_aux], dim=1)
-#        H_half = self.H_net(z_combined_half).squeeze(-1)
-#        dHdq_half = torch.autograd.grad(H_half, q_full, grad_outputs=torch.ones_like(H_half), create_graph=True)[0]
-#        
-#        p_full = p_half - (dt/2) * self.dt_p * dHdq_half + (dt/2) * self.alpha * (z_active_half @ self.S)[:, 2:]
-#
-#        z_active_final = torch.cat([q_full, p_full], dim=1)
-#        return torch.cat([z_active_final, z_aux], dim=1)
-
-
-#    def suzuki_4th_order(self,z, dt):
-#        # Coefficients for symmetric composition
-#        s = (4 ** (1/3))
-#        a1 = 1/(2*(2 - s))
-#        a2 = (1 - s)/(2*(2 - s))
-#        
-#        z = self.verlet_step(z, a1*dt)
-#        z = self.verlet_step(z, a1*dt)
-#        z = self.verlet_step(z, a2*dt)
-#        z = self.verlet_step(z, a1*dt)
-#        z = self.verlet_step(z, a1*dt)
-#        return z
-
-#    def forward(self, z, dt=0.1):
-#        return self.suzuki_4th_order(z, dt)
-
-
-    def enforce_symplecticity(self):
-        with torch.no_grad():
-            self.S.data = 0.5 * (self.S - self.S.t())
-            self.dt_q.data.abs_()
-            self.dt_p.data.abs_()
 
 class PNN(nn.Module):
     def __init__(self):
         super().__init__()
         self.transformer = NICECouplingLayer(4, 64)
-        self.sympNet = ExtendedSympNet(4)
+        self.sympNet = ExtendedSympNet(d=2, c_dim=0, l=128, depth=6)
         self.lowestLoss = float('inf')
 
     def forward(self, x):
@@ -187,53 +120,36 @@ class PNN(nn.Module):
             
         return torch.stack(trajectory)
 
-#def load_data():
-#    # Load training data
-#    with open('../../data/train.txt', 'r') as f:
-#        train_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
-#    
-#    # Load testing data
-#    with open('../../data/test.txt', 'r') as f:
-#        test_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
-#
-#    # Process data
-#    train_data = torch.tensor(train_lines[:1200], dtype=torch.float32)
-#    trainP_data = torch.tensor(train_lines[1:1201], dtype=torch.float32)
-#    test_data = torch.tensor(test_lines[:300], dtype=torch.float32)
-#    
-#    train_data = torch.nn.functional.normalize(train_data, p=2, dim=1)
-#    test_data = torch.nn.functional.normalize(test_data, p=2, dim=1)
-#    trainP_data = torch.nn.functional.normalize(trainP_data, p=2, dim=1)
-#
-#    return train_data, trainP_data, test_data
-
-
 def load_data():
-    # Load and normalize data with feature-wise standardization
-    def process_data(lines):
-        data = torch.tensor([list(map(float, line.strip().split())) for line in lines if line.strip()])
-        means = data.mean(dim=0)
-        stds = data.std(dim=0)
-        return (data - means) / (stds + 1e-8)
-
+    # Load training data
     with open('../../data/train.txt', 'r') as f:
-        train_data = process_data(f.readlines()[:1200])
-        
+        train_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
+    
+    # Load testing data
     with open('../../data/test.txt', 'r') as f:
-        test_data = process_data(f.readlines()[:300])
+        test_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
 
-    # Create shifted targets for training
-    return (train_data[:-1], train_data[1:], test_data)
+    # Process data
+    train_data = torch.tensor(train_lines[:1200], dtype=torch.float32)
+    trainP_data = torch.tensor(train_lines[1:1201], dtype=torch.float32)
+    test_data = torch.tensor(test_lines[:300], dtype=torch.float32)
+    
+    train_data = torch.nn.functional.normalize(train_data, p=2, dim=1)
+    test_data = torch.nn.functional.normalize(test_data, p=2, dim=1)
+    trainP_data = torch.nn.functional.normalize(trainP_data, p=2, dim=1)
+
+    return train_data, trainP_data, test_data
 
 
-def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
+def train(model, X_train, y_train, X_test, epochs=500000, lr=0.01):
 
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
-    optimizer = torch.optim.Adam(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=lr,              # or your specific learning rate
         betas=(0.9, 0.999),   # default AdamW momentum settings
+        weight_decay=1e-3,
         eps=1e-8              # numerical stability
     )
 
@@ -245,8 +161,8 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
     scheduler = ReduceLROnPlateau(
     optimizer,
     mode='min',
-    factor=0.5,
-    patience=5,
+    factor=0.7,
+    patience=10,
     min_lr=1e-6
     )
     
@@ -274,7 +190,8 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
         
         # Enforce symplecticity
         if epoch % 100 == 0:
-            model.sympNet.enforce_symplecticity()
+            pass
+            #model.sympNet.enforce_symplecticity()
 
         # Validation
         if epoch % 100 == 0:
@@ -294,7 +211,7 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
             pbar.set_description(f"Epoch {epoch} | "
                                  f"Train Loss: {epoch_loss:.6f} | "
                                  f"Test Loss: {test_loss:.3e} | "
-                                 f"LR: {lr:.6f} | "
+                                 f"LR: {optimizer.param_groups[0]['lr']:.6f} | "
                                  f"PB: {best_loss:.6f}")
 
 
@@ -375,9 +292,7 @@ def plotMSE(loss, save_path='test.png', show=True):
     plt.close()
 
 if __name__ == "__main__":
-    test = GradientUp(4,128)
-    test.forward(torch.tensor([[1,2,3,4]]))
-    #X_train, y_train, X_test = load_data()
-    #model = PNN().to(device)
-    #X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
-    #train(model, X_train, y_train, X_test)
+    X_train, y_train, X_test = load_data()
+    model = PNN().to(device)
+    X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
+    train(model, X_train, y_train, X_test)

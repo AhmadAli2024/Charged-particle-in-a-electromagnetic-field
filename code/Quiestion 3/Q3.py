@@ -8,8 +8,8 @@ from torch.utils.data import DataLoader, TensorDataset
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-class PINNS(nn.Module):
-    def __init__(self, hidden_dim, q=4):
+class PINN(nn.Module):
+    def __init__(self, hidden_dim=128):
         super().__init__()
 
         self.model = nn.Sequential(
@@ -28,149 +28,209 @@ class PINNS(nn.Module):
         self.lambda3 = nn.Parameter(torch.tensor(0.5))
         self.lambda4 = nn.Parameter(torch.tensor(0.5))
 
-    def forward(self, X):
-        return self.model(X)
+    def computeDerivative(self, X, dt=0.1):
+        # make X require grad
+        X = X.requires_grad_()
+        # Get the Hamiltonian
+        H = self.model(X)
+        # Get the derivative of the Hamiltonian
+        dH = torch.autograd.grad(H,X,grad_outputs=torch.ones_like(H),create_graph=True)[0] 
+        # Split derivatives
+        dH_dq = dH[:,2:]
+        dH_dp = dH[:,:2]
+        return torch.cat([-dH_dq,dH_dp],dim=1) # Return in terms of dt
 
-    def loss(self, X, y, pred, dt=0.1):
-        # Current state (t)
-        v_current = X[:, :2]
-        x_current = X[:, 2:]
-        
-        # Next state (t+dt) - ground truth
-        v_next_true = y[:, :2]
-        x_next_true = y[:, 2:]
-        
-        # Predicted next state (t+dt)
-        v_next_pred = pred[:, :2]
-        x_next_pred = pred[:, 2:]
-        
-        # Compute Coulomb force using current position
-        x_norm = torch.norm(x_current, dim=1, keepdim=True) + 1e-8
-        coulomb_term = x_current / (x_norm**3)
-        
-        # Compute derivatives using current and next state
-        dvdt = (v_next_pred - v_current) / dt
-        dxdt = (x_next_pred - x_current) / dt
-        
-        # Physics residuals
-        Rv = coulomb_term - dvdt  # F = ma residual
-        Rx = v_current - dxdt     # dx/dt = v residual
-        
-        # Loss components with softplus to ensure positivity
-        lambda1 = F.softplus(self.lambda1)
-        lambda2 = F.softplus(self.lambda2)
-        lambda3 = F.softplus(self.lambda3)
-        lambda4 = F.softplus(self.lambda4)
-        
-        physics_loss = lambda1 * torch.mean(Rv**2) + lambda2 * torch.mean(Rx**2)
-        data_loss = lambda3 * F.mse_loss(v_next_pred, v_next_true) + lambda4 * F.mse_loss(x_next_pred, x_next_true)
-        
-        total_loss = physics_loss + data_loss
-        return total_loss
+    def rk4Step(self, X, dt):
+        k1 = self.computeDerivative(X)
+        k2 = self.computeDerivative(X + 0.5 * dt * k1)
+        k3 = self.computeDerivative(X + 0.5 * dt * k2)
+        k4 = self.computeDerivative(X + dt * k3)
 
-    def train_pinn(self, X_train, y_train, epochs=10000, lr=0.001, dt=0.1, batch_size=64):
-        optimizer = torch.optim.Adam(self.parameters(), lr=lr)
-        training_losses = []
-        
-        dataset = TensorDataset(X_train, y_train)
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-        
-        for epoch in range(epochs):
-            epoch_loss = 0.0
-            for batch_X, batch_y in loader:
-                optimizer.zero_grad()
-                pred_y = self.forward(batch_X)
-                loss = self.loss(batch_X, batch_y, pred_y, dt=dt)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
-                optimizer.step()
-                epoch_loss += loss.item()
-            
-            epoch_loss /= len(loader)
-            training_losses.append(epoch_loss)
-            
-            if epoch % 100 == 0:
-                print(f"Epoch {epoch}, Loss: {epoch_loss:.6f}")
-        
-        return training_losses
+        return X + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)`
 
-    def predict(self, x0, steps, dt=0.1):
-        trajectory = [x0]
-        current_state = x0.clone()
-        for _ in range(steps):
-            next_state = self.forward(current_state)
-            trajectory.append(next_state)
-            current_state = next_state.detach()  # Detach to prevent gradient accumulation
-        return torch.stack(trajectory)
+    def risidualLoss(self,X,Y,dt):
+        return F.mse_loss(rk4Step(X,dt),Y)
+        
 
-def evaluate_and_plot(model, X_test, steps=300):
-    initial_state = X_test[0:1].to(device)
+
+
+
+
+def load_data():
+    # Load training data
+    with open('../../data/train.txt', 'r') as f:
+        train_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
     
-    # Generate predictions
+    # Load testing data
+    with open('../../data/test.txt', 'r') as f:
+        test_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
+
+    # Process data
+    train_data = torch.tensor(train_lines[:1200], dtype=torch.float32)
+    trainP_data = torch.tensor(train_lines[1:1201], dtype=torch.float32)
+    test_data = torch.tensor(test_lines[:300], dtype=torch.float32)
+    
+    train_data = torch.nn.functional.normalize(train_data, p=2, dim=1)
+    test_data = torch.nn.functional.normalize(test_data, p=2, dim=1)
+    trainP_data = torch.nn.functional.normalize(trainP_data, p=2, dim=1)
+
+    return train_data, trainP_data, test_data
+
+def train(model, X_train, y_train, X_test, epochs=500000, lr=0.01):
+
+    model = model.to(device)
+    X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=lr,              # or your specific learning rate
+        betas=(0.9, 0.999),   # default AdamW momentum settings
+        weight_decay=1e-3,
+        eps=1e-8              # numerical stability
+    )
+
+    best_loss = float('inf')
+    no_improve = 0
+    batch_size = 128
+
+    # Learning rate scheduler
+    scheduler = ReduceLROnPlateau(
+    optimizer,
+    mode='min',
+    factor=0.7,
+    patience=10,
+    min_lr=1e-6
+    )
+    
+    for epoch in (pbar := tqdm(range(epochs))):
+        model.train()
+        epoch_loss = 0
+        
+        # Shuffle data
+        perm = torch.randperm(len(X_train))
+        X_train, y_train = X_train[perm], y_train[perm]
+        
+        for i in range(0, len(X_train), batch_size):
+            X_batch = X_train[i:i+batch_size].requires_grad_(True)
+            y_batch = y_train[i:i+batch_size]
+            
+            optimizer.zero_grad()
+            pred = model(X_batch)
+            loss = F.mse_loss(pred, y_batch)
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            
+            epoch_loss += loss.item()
+        
+        # Enforce symplecticity
+        if epoch % 100 == 0:
+            pass
+            #model.sympNet.enforce_symplecticity()
+
+        # Validation
+        if epoch % 100 == 0:
+            model.eval()
+            with torch.no_grad():
+                test_loss = evaluate(model, X_test)
+                scheduler.step(test_loss)
+
+                if test_loss < best_loss:
+                    best_loss = test_loss
+                    torch.save(model.state_dict(), "best_model.pth")
+                    pred_trajectory = model.predict(X_test[0:1].clone().to(device), 299)
+                    mse_T = F.mse_loss(pred_trajectory,X_test[:300],reduction='none').mean(dim=1)
+                    plotMSE(mse_T,save_path=f'MSE_{epoch}.png')
+                    plot(X_test[:300], pred_trajectory, save_path=f'trajectory_epoch_{epoch}.png')
+                
+            pbar.set_description(f"Epoch {epoch} | "
+                                 f"Train Loss: {epoch_loss:.6f} | "
+                                 f"Test Loss: {test_loss:.3e} | "
+                                 f"LR: {optimizer.param_groups[0]['lr']:.6f} | "
+                                 f"PB: {best_loss:.6f}")
+
+
+def evaluate(model, X_test, steps=300):
+    model.eval()
+    initial = X_test[0:1].clone().to(device)
+    ground_truth = X_test[:steps+1].cpu()
+    
     with torch.no_grad():
-        predicted = model.predict(initial_state, steps)
+        # Enable gradients temporarily for physics calculations
+        with torch.enable_grad():
+            predicted = model.predict(initial, steps-1).cpu()
     
-    # Ground truth (assuming X_test contains sequential states)
-    ground_truth = X_test[:steps+1]
+    return F.mse_loss(predicted, ground_truth).sum()
+
+def plot(ground_truth, predicted_trajectory, save_path='test.png', show=True):
+    if os.path.exists(save_path):
+        os.remove(save_path)
+    plt.figure(figsize=(8, 6))
+
+    # Ground truth trajectory
+    plt.plot(
+        ground_truth[:, 2].cpu().numpy(), ground_truth[:, 3].cpu().numpy(),
+        'b-', label='Ground Truth', linewidth=2
+    )
+
+    # Predicted trajectory
+    plt.plot(
+        predicted_trajectory[:, 2].cpu().detach().numpy(), predicted_trajectory[:, 3].cpu().detach().numpy(),
+        'r--', label='PNN Prediction', linewidth=2
+    )
+
+    # Start point
+    plt.scatter(
+        ground_truth[0, 2].cpu().numpy(), ground_truth[0, 3].cpu().numpy(),
+        c='green', s=100, label='Start Point'
+    )
+
+    plt.xlabel('Position $x_1$', fontsize=14)
+    plt.ylabel('Position $x_2$', fontsize=14)
+    plt.title('Charged Particle Trajectory Prediction', fontsize=16)
+    plt.legend(fontsize=12)
+    plt.grid(True)
+    plt.axis('equal')  # Maintains spatial proportions
+
+    plt.tight_layout()
+    plt.savefig(save_path)
+    if show:
+        plt.show()
+    plt.close()
+
+def plotMSE(loss, save_path='test.png', show=True):
+    """Plot the ground truth vs predicted trajectory"""
+    if os.path.exists(save_path):
+        os.remove(save_path)
+        
+    plt.figure(figsize=(8, 6))
     
-    # Plot trajectories
-    plt.figure(figsize=(12, 6))
-    plt.plot(ground_truth[:, 2].cpu(), ground_truth[:, 3].cpu(), 'b-', label='Ground Truth')
-    plt.plot(predicted[:, 0, 2].cpu(), predicted[:, 0, 3].cpu(), 'r--', label='Prediction')
-    plt.scatter(ground_truth[0, 2].cpu(), ground_truth[0, 3].cpu(), c='g', s=100, label='Start')
-    plt.xlabel('x1')
-    plt.ylabel('x2')
-    plt.legend()
-    plt.title('Trajectory Comparison')
-    plt.savefig('trajectory.png')
-    plt.show()
+    t = torch.arange(len(loss))
+
+    plt.plot(t.numpy(),loss.cpu().numpy())
+    plt.xlabel("Step(0.1 Seconds)")
+    plt.ylabel("MSE Loss")
+    plt.title("MSE Vs Time")
+
     
-    # Calculate MSE
-    mse = F.mse_loss(predicted[:len(ground_truth), 0], ground_truth).item()
-    print(f"Trajectory MSE: {mse:.4e}")
-    return mse
+    try:
+        plt.savefig(save_path)
+        #print(f"Plot saved to {save_path}")
+    except Exception as e:
+        pass
+        #print(f"Error saving plot: {e}")
+    
+    if show:
+        plt.show()
+    
+    plt.close()
+
 
 if __name__ == "__main__":
-    # Load data
-    try:
-        train_data = np.loadtxt('../data/train.txt')
-        test_data = np.loadtxt('../data/test.txt')
-        
-        # Convert to PyTorch tensors
-        X_train = torch.tensor(train_data[:-1], dtype=torch.float32)
-        y_train = torch.tensor(train_data[1:], dtype=torch.float32)
-        X_test = torch.tensor(test_data, dtype=torch.float32)
-        
-    except FileNotFoundError:
-        print("Generating synthetic data...")
-        t = torch.linspace(0, 20, 2000)
-        x = torch.stack([
-            torch.sin(t) + 0.1*torch.randn(len(t)),
-            torch.cos(t) + 0.1*torch.randn(len(t)),
-            torch.sin(t) * 0.5,
-            torch.cos(t) * 0.5
-        ], dim=1)
-        X_train = x[:-1000]
-        y_train = x[1:-999]
-        X_test = x[-1000:]
-    
-    # Move data to device
-    X_train, y_train = X_train.to(device), y_train.to(device)
-    X_test = X_test.to(device)
+    #X_train, y_train, X_test = load_data()
+    model = PINN().to(device)
+    #X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
+    #train(model, X_train, y_train, X_test)
+    test = torch.tensor([[1.0,2.0,3.0,4.0]]).to(device)
+    print(model.forward(test))
 
-    # Initialize and train model
-    pinn = PINNS(hidden_dim=128).to(device)
-    losses = pinn.train_pinn(X_train, y_train, epochs=10000, lr=0.001)
-    
-    # Plot training loss
-    plt.semilogy(losses)
-    plt.title('Training Loss')
-    plt.xlabel('Epoch')
-    plt.ylabel('Log Loss')
-    plt.savefig('training_loss.png')
-    plt.show()
-    
-    # Evaluate
-    test_mse = evaluate_and_plot(pinn, X_test)
-    torch.save(pinn.state_dict(), 'charged_particle_pinn.pth')
-    print(f"Test MSE: {test_mse:.4e}")
