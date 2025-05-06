@@ -1,9 +1,12 @@
 import torch
+import os
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader, TensorDataset
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+from tqdm import tqdm
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
@@ -40,20 +43,51 @@ class PINN(nn.Module):
         dH_dp = dH[:,:2]
         return torch.cat([-dH_dq,dH_dp],dim=1) # Return in terms of dt
 
-    def rk4Step(self, X, dt):
+    def rk4StepForward(self, X, dt):
         k1 = self.computeDerivative(X)
         k2 = self.computeDerivative(X + 0.5 * dt * k1)
         k3 = self.computeDerivative(X + 0.5 * dt * k2)
         k4 = self.computeDerivative(X + dt * k3)
 
-        return X + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)`
+        return X + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+    def rk4StepBackwards(self, X, dt):
+        k1 = self.computeDerivative(X)
+        k2 = self.computeDerivative(X - 0.5 * dt * k1)
+        k3 = self.computeDerivative(X - 0.5 * dt * k2)
+        k4 = self.computeDerivative(X - dt * k3)
+
+        return X - (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
     def risidualLoss(self,X,Y,dt):
-        return F.mse_loss(rk4Step(X,dt),Y)
+        # Step forward and back
+        XPred = self.rk4StepForward(X,dt)
+        YPred = self.rk4StepBackwards(Y,dt)
+        # split the position from velocity for better accuracy
+        Xp = XPred[:,:2]
+        Xq = XPred[:,2:]
+        Yp = YPred[:,:2]
+        Yq = YPred[:,2:]
+        # Get all the losses
+        XPredLoss = self.lambda1 * F.mse_loss(Xp,Y[:,:2]) + self.lambda2 * F.mse_loss(Xq,Y[:,2:])
+        YPredLoss = self.lambda3 * F.mse_loss(Yp,X[:,:2]) + self.lambda4 * F.mse_loss(Yq,X[:,2:])
+        return YPredLoss + XPredLoss
+
+    def forward(self,X,dt):
+        return self.rk4StepForward(X,dt)
+
+    def predict(self, x, steps):
+        trajectory = [x.detach()[0]]
+        current = x.clone()
         
-
-
-
+        for _ in range(steps):
+            with torch.enable_grad():  # Enable gradients temporarily
+                current = current.requires_grad_(True)
+                next_step = self.forward(current,0.1)
+            trajectory.append(next_step.detach()[0])
+            current = next_step.detach()
+            
+        return torch.stack(trajectory)
 
 
 def load_data():
@@ -114,20 +148,14 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.01):
             y_batch = y_train[i:i+batch_size]
             
             optimizer.zero_grad()
-            pred = model(X_batch)
-            loss = F.mse_loss(pred, y_batch)
+            loss = model.risidualLoss(X_batch,y_batch,0.1)
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             
-            epoch_loss += loss.item()
+            epoch_loss += loss
         
-        # Enforce symplecticity
-        if epoch % 100 == 0:
-            pass
-            #model.sympNet.enforce_symplecticity()
-
         # Validation
         if epoch % 100 == 0:
             model.eval()
@@ -227,10 +255,8 @@ def plotMSE(loss, save_path='test.png', show=True):
 
 
 if __name__ == "__main__":
-    #X_train, y_train, X_test = load_data()
+    X_train, y_train, X_test = load_data()
     model = PINN().to(device)
-    #X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
-    #train(model, X_train, y_train, X_test)
-    test = torch.tensor([[1.0,2.0,3.0,4.0]]).to(device)
-    print(model.forward(test))
+    X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
+    train(model, X_train, y_train, X_test)
 
