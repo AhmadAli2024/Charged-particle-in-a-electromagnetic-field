@@ -18,12 +18,10 @@ class PINN(nn.Module):
         self.model = nn.Sequential(
             nn.Linear(4, hidden_dim),
             nn.Tanh(),
-            nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.Tanh(),
-            nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, 1)
@@ -131,6 +129,9 @@ class PINN(nn.Module):
     def forward(self,X,dt):
         return self.rk4StepForward(X,dt)
 
+    def learnedForward(self,X,dt):
+        return self.Rrk4StepForward(X,dt)
+
     def predict(self, x, steps):
         trajectory = [x.detach()[0]]
         current = x.clone()
@@ -138,7 +139,7 @@ class PINN(nn.Module):
         for _ in range(steps):
             with torch.enable_grad():  # Enable gradients temporarily
                 current = current.requires_grad_(True)
-                next_step = self.forward(current,0.1)
+                next_step = self.learnedForward(current,0.1)
             trajectory.append(next_step.detach()[0])
             current = next_step.detach()
             
