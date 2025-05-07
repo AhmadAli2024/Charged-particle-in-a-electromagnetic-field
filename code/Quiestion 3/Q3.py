@@ -13,8 +13,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # Global variables
-sigma_x_std = None
-sigma_p_std = None
+sigmaN = None
+muN  = None
 
 def set_seed(seed=42):
     torch.manual_seed(seed)
@@ -41,8 +41,8 @@ class PINN(nn.Module):
         )
 
         # Lambda 1 being m and Lambda 2 being q
-        self.register_parameter('log_lambda1', nn.Parameter(torch.log(torch.tensor(0.5))))
-        self.register_parameter('log_lambda2', nn.Parameter(torch.log(torch.tensor(0.5))))
+        self.register_parameter('log_lambda1', nn.Parameter(torch.log(torch.tensor(0.8))))
+        self.register_parameter('log_lambda2', nn.Parameter(torch.log(torch.tensor(0.8))))
 
     @property
     def lambda1(self):
@@ -126,15 +126,6 @@ class PINN(nn.Module):
         return X - (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
     def risidualLoss(self,X,Y,dt):
-        # Actual Loss
-        XPredA = self.rk4StepForward(X,dt)
-        YPredA = self.rk4StepBackwards(Y,dt)
-        XpA = XPredA[:,:2]
-        XqA = XPredA[:,2:]
-        YpA = YPredA[:,:2]
-        YqA = YPredA[:,2:]
-        XPredLossA = F.mse_loss(XpA,Y[:,:2]) + F.mse_loss(XqA,Y[:,2:])
-        YPredLossA = F.mse_loss(YpA,X[:,:2]) + F.mse_loss(YqA,X[:,2:])
         # Step forward and back
         XPred = self.Rrk4StepForward(X,dt)
         YPred = self.Rrk4StepBackwards(Y,dt)
@@ -146,7 +137,7 @@ class PINN(nn.Module):
         # Get all the losses
         XPredLoss = F.mse_loss(Xp,Y[:,:2]) + F.mse_loss(Xq,Y[:,2:])
         YPredLoss = F.mse_loss(Yp,X[:,:2]) + F.mse_loss(Yq,X[:,2:])
-        return YPredLoss + XPredLoss + XPredLossA + YPredLossA
+        return YPredLoss + XPredLoss
 
     def forward(self,X,dt):
         return self.rk4StepForward(X,dt)
@@ -175,8 +166,8 @@ def load_data(
     test_size:  int = 300,
     eps: float = 1e-8
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    global sigma_x_std
-    global sigma_p_std
+    global sigmaN 
+    global muN 
     # Read raw lines
     with open(train_path, 'r') as f:
         raw_train = [list(map(float, line.split())) for line in f if line.strip()]
@@ -192,19 +183,19 @@ def load_data(
     mean = train_data.mean(dim=0, keepdim=True)
     std  = train_data.std(dim=0, keepdim=True) + eps
 
-    sigma_x_std = std[0,:2]
-    sigma_p_std = std[0,2:]
+    sigmaN = std
+    muN = mean
 
     # Apply normalization
-    train_data  = (train_data  - mean) / std
-    trainP_data = (trainP_data - mean) / std
-    test_data   = (test_data   - mean) / std
+    #train_data  = (train_data  - mean) / std
+    #trainP_data = (trainP_data - mean) / std
+    #test_data   = (test_data   - mean) / std
 
     return train_data, trainP_data, test_data
 
 def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
-    global sigma_p_std
-    global sigma_x_std
+    global sigmaN
+    global muN
 
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
@@ -212,7 +203,7 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
         model.parameters(),
         lr=lr,              # or your specific learning rate
         betas=(0.9, 0.999),   # default AdamW momentum settings
-        weight_decay=1e-3,
+        #weight_decay=1e-3,
         eps=1e-8              # numerical stability
     )
 
@@ -242,12 +233,16 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
             
             optimizer.zero_grad()
             loss = model.risidualLoss(X_batch,y_batch,0.1)
+            X_pred = model.rk4StepForward(X_batch,0.1)
+            Y_pred = model.rk4StepBackwards(y_batch,0.1)
+            Aloss = F.mse_loss(X_pred, y_batch) + F.mse_loss(Y_pred,X_batch)
+            loss+=Aloss
             
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             
-            epoch_loss += loss
+            epoch_loss += Aloss
         
         # Validation
         if epoch % 50 == 0:
@@ -263,17 +258,16 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
                     mse_T = F.mse_loss(pred_trajectory,X_test[:300],reduction='none').mean(dim=1)
                     plotMSE(mse_T,save_path=f'MSE_{epoch}.png')
                     plot(X_test[:300], pred_trajectory, save_path=f'trajectory_epoch_{epoch}.png')
-                    lambda1_norm = model.lambda1.item()
-                    lambda2_norm = model.lambda2.item()
-                    lambda1_phys = lambda1_norm * (sigma_p_std**2 / sigma_x_std**2).mean().item()
-                    lambda2_phys = lambda2_norm * (sigma_p_std   / sigma_x_std).mean().item()
+                    m = 1/model.lambda1
+                    q = model.lambda2*m
                 
             pbar.set_description(f"Epoch {epoch} | "
-                                 f"Train Loss: {epoch_loss:.6f} | "
-                                 f"Test Loss: {test_loss:.3e} | "
+                                 f"Hamiltonian Loss: {epoch_loss:.6f} | "
+                                 f"Plot Loss: {test_loss:.3e} | "
                                  f"LR: {optimizer.param_groups[0]['lr']:.6f} | "
-                                 f"m: {1/model.lambda1:.6f} | "
-                                 f"q: {model.lambda2*((1/model.lambda1)**2):.6f}")
+                                 f"m: {m:.6f} | "
+                                 f"q: {q:.6f} | "
+                                 f"ratio: {model.lambda2:.6f}")
 
 
 def evaluate(model, X_test, steps=300):
