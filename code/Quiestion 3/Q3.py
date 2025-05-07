@@ -21,10 +21,11 @@ class PINN(nn.Module):
             nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Tanh(),
             nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
-            nn.Dropout(0.2),
             nn.Linear(hidden_dim, 1)
         )
 
@@ -66,9 +67,10 @@ class PINN(nn.Module):
         H = self.model(X).squeeze()
         # Get the derivative of the Hamiltonian
         dH = torch.autograd.grad(H,X,grad_outputs=torch.ones_like(H),create_graph=True)[0] 
-        dynamic = self.dynamicMatrix(X)
-        result = torch.bmm(dynamic, dH.unsqueeze(2)).squeeze(2)
-        return result
+        dH_pos = dH[:,:2]  
+        dH_neg = -dH[:,2:]  
+
+        return torch.cat((dH_pos, dH_neg), dim=1)
 
     def rk4StepForward(self, X, dt):
         k1 = self.computeDerivative(X)
@@ -86,10 +88,36 @@ class PINN(nn.Module):
 
         return X - (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
+    def risidualFunc(self,X,dt=0.1):
+        # make X require grad
+        X = X.requires_grad_()
+        # Get the Hamiltonian
+        H = self.model(X).squeeze()
+        # Get the derivative of the Hamiltonian
+        dH = torch.autograd.grad(H,X,grad_outputs=torch.ones_like(H),create_graph=True)[0] 
+        dynamic = self.dynamicMatrix(X)
+        return torch.bmm(dynamic, dH.unsqueeze(2)).squeeze(2)
+
+    def Rrk4StepForward(self, X, dt=0.1):
+        k1 = self.risidualFunc(X)
+        k2 = self.risidualFunc(X + 0.5 * dt * k1)
+        k3 = self.risidualFunc(X + 0.5 * dt * k2)
+        k4 = self.risidualFunc(X + dt * k3)
+
+        return X + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
+    def Rrk4StepBackwards(self, X, dt=0.1):
+        k1 = self.risidualFunc(X)
+        k2 = self.risidualFunc(X - 0.5 * dt * k1)
+        k3 = self.risidualFunc(X - 0.5 * dt * k2)
+        k4 = self.risidualFunc(X - dt * k3)
+
+        return X - (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
+
     def risidualLoss(self,X,Y,dt):
         # Step forward and back
-        XPred = self.rk4StepForward(X,dt)
-        YPred = self.rk4StepBackwards(Y,dt)
+        XPred = self.Rrk4StepForward(X,dt)
+        YPred = self.Rrk4StepBackwards(Y,dt)
         # split the position from velocity for better accuracy
         Xp = XPred[:,:2]
         Xq = XPred[:,2:]
@@ -137,7 +165,7 @@ def load_data():
 
     return train_data, trainP_data, test_data
 
-def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
+def train(model, X_train, y_train, X_test, epochs=500000, lr=0.005):
 
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
