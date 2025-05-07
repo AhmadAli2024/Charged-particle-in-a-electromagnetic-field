@@ -24,6 +24,8 @@ class PINN(nn.Module):
             nn.Tanh(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU(),
             nn.Linear(hidden_dim, 1)
         )
 
@@ -170,13 +172,17 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
 
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=lr,              # or your specific learning rate
-        betas=(0.9, 0.999),   # default AdamW momentum settings
-        weight_decay=1e-3,
-        eps=1e-8              # numerical stability
-    )
+    #optimizer = torch.optim.AdamW(
+    #    model.parameters(),
+    #    lr=lr,              # or your specific learning rate
+    #    betas=(0.9, 0.999),   # default AdamW momentum settings
+    #    weight_decay=1e-3,
+    #    eps=1e-8              # numerical stability
+    #)
+    optimizer = torch.optim.AdamW([
+    {'params': pinn.model.parameters(),         'lr': 5e-3},
+    {'params': [pinn.log_lambda1, pinn.log_lambda2], 'lr': 1e-4},
+    ], weight_decay=1e-3)
 
     best_loss = float('inf')
     batch_size = 128
@@ -186,7 +192,7 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
     optimizer,
     mode='min',
     factor=0.7,
-    patience=10,
+    patience=5,
     min_lr=1e-6
     )
     
