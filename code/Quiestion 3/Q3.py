@@ -1,4 +1,5 @@
 import torch
+import random
 import os
 import torch.nn as nn
 import torch.nn.functional as F
@@ -14,6 +15,14 @@ print(f"Using device: {device}")
 # Global variables
 sigma_x = None
 sigma_p = None
+
+def set_seed(seed=42):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    np.random.seed(seed)  # For NumPy
+    random.seed(seed)     # For Python's random module
 
 class PINN(nn.Module):
     def __init__(self, hidden_dim=128):
@@ -48,7 +57,7 @@ class PINN(nn.Module):
         x3, x4 = X[:, 2], X[:, 3]
         a = (x3 ** 2 + x4 ** 2) ** (1/2)  # shape: (batch_size,)
         b = self.lambda1 # This coresponds to 1/m
-        c = self.lambda2 * b # This corespons to q/m^2 
+        c = self.lambda2 * b # This corespons to q/m * 1/m
 
         zeros = torch.zeros(batch_size, device=X.device)
 
@@ -118,14 +127,14 @@ class PINN(nn.Module):
 
     def risidualLoss(self,X,Y,dt):
         # Actual Loss
-        XPredA = self.rk4StepForward(X,dt)
-        YPredA = self.rk4StepBackwards(Y,dt)
-        XpA = XPredA[:,:2]
-        XqA = XPredA[:,2:]
-        YpA = YPredA[:,:2]
-        YqA = YPredA[:,2:]
-        XPredLossA = F.mse_loss(XpA,Y[:,:2]) + F.mse_loss(XqA,Y[:,2:])
-        YPredLossA = F.mse_loss(YpA,X[:,:2]) + F.mse_loss(YqA,X[:,2:])
+        #XPredA = self.rk4StepForward(X,dt)
+        #YPredA = self.rk4StepBackwards(Y,dt)
+        #XpA = XPredA[:,:2]
+        #XqA = XPredA[:,2:]
+        #YpA = YPredA[:,:2]
+        #YqA = YPredA[:,2:]
+        #XPredLossA = F.mse_loss(XpA,Y[:,:2]) + F.mse_loss(XqA,Y[:,2:])
+        #YPredLossA = F.mse_loss(YpA,X[:,:2]) + F.mse_loss(YqA,X[:,2:])
         # Step forward and back
         XPred = self.Rrk4StepForward(X,dt)
         YPred = self.Rrk4StepBackwards(Y,dt)
@@ -137,7 +146,8 @@ class PINN(nn.Module):
         # Get all the losses
         XPredLoss = F.mse_loss(Xp,Y[:,:2]) + F.mse_loss(Xq,Y[:,2:])
         YPredLoss = F.mse_loss(Yp,X[:,:2]) + F.mse_loss(Yq,X[:,2:])
-        return YPredLoss + XPredLoss + XPredLossA + YPredLossA
+        #return YPredLoss + XPredLoss + XPredLossA + YPredLossA
+        return YPredLoss + XPredLoss 
 
     def forward(self,X,dt):
         return self.rk4StepForward(X,dt)
@@ -180,16 +190,16 @@ def load_data(
     test_data   = torch.tensor(raw_test[:test_size],  dtype=torch.float32)
 
     # Compute per-feature mean and std on training set
-    #mean = train_data.mean(dim=0, keepdim=True)
-    #std  = train_data.std(dim=0, keepdim=True) + eps
+    mean = train_data.mean(dim=0, keepdim=True)
+    std  = train_data.std(dim=0, keepdim=True) + eps
 
-    #sigma_x = mean[0,:2]
-    #sigma_p = mean[0,2:]
+    sigma_x = mean[0,:2]
+    sigma_p = mean[0,2:]
 
     # Apply normalization
-    #train_data  = (train_data  - mean) / std
-    #trainP_data = (trainP_data - mean) / std
-    #test_data   = (test_data   - mean) / std
+    train_data  = (train_data  - mean) / std
+    trainP_data = (trainP_data - mean) / std
+    test_data   = (test_data   - mean) / std
 
     return train_data, trainP_data, test_data
 
@@ -254,10 +264,10 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
                     mse_T = F.mse_loss(pred_trajectory,X_test[:300],reduction='none').mean(dim=1)
                     plotMSE(mse_T,save_path=f'MSE_{epoch}.png')
                     plot(X_test[:300], pred_trajectory, save_path=f'trajectory_epoch_{epoch}.png')
-                    #lambda1_norm = model.lambda1.item()
-                    #lambda2_norm = model.lambda2.item()
-                    #lambda1_phys = lambda1_norm * (sigma_p**2 / sigma_x**2).mean().item()
-                    #lambda2_phys = lambda2_norm * (sigma_p   / sigma_x).mean().item()
+                    lambda1_norm = model.lambda1.item()
+                    lambda2_norm = model.lambda2.item()
+                    lambda1_phys = lambda1_norm * (sigma_p**2 / sigma_x**2).mean().item()
+                    lambda2_phys = lambda2_norm * (sigma_p   / sigma_x).mean().item()
                 
             pbar.set_description(f"Epoch {epoch} | "
                                  f"Train Loss: {epoch_loss:.6f} | "
@@ -344,6 +354,7 @@ def plotMSE(loss, save_path='test.png', show=True):
 
 
 if __name__ == "__main__":
+    set_seed(6532)
     X_train, y_train, X_test = load_data()
     model = PINN().to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
