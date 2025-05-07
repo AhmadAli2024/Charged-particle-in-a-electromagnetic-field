@@ -41,16 +41,23 @@ class PINN(nn.Module):
         return torch.exp(self.log_lambda2)
 
     def dynamicMatrix(self, X):
-        matrices = []
-        for i in X:
-            mat = torch.tensor([
-                [0, (self.lambda1 / (self.lambda2 ** 2)) * ((i[2] ** 2 + i[3] ** 2) ** 2), -1 / self.lambda2, 0],
-                [-(self.lambda1 / (self.lambda2 ** 2)) * ((i[2] ** 2 + i[3] ** 2) ** 2), 0, 0, -1 / self.lambda2],
-                [1 / self.lambda2, 0, 0, 0],
-                [0, 1 / self.lambda2, 0, 0]
-            ], dtype=i.dtype, device=i.device)
-            matrices.append(mat)
-        return torch.stack(matrices)  # shape: (batch_size, 4, 4)
+        batch_size = X.shape[0]
+        x3, x4 = X[:, 2], X[:, 3]
+        a = (x3 ** 2 + x4 ** 2) ** 2  # shape: (batch_size,)
+        c = self.lambda1 / (self.lambda2 ** 2)
+        b = 1 / self.lambda2
+
+        zeros = torch.zeros(batch_size, device=X.device)
+
+        row0 = torch.stack([zeros, c * a, -b.expand_as(a), zeros], dim=1)
+        row1 = torch.stack([-c * a, zeros, zeros, -b.expand_as(a)], dim=1)
+        row2 = torch.stack([b.expand_as(a), zeros, zeros, zeros], dim=1)
+        row3 = torch.stack([zeros, b.expand_as(a), zeros, zeros], dim=1)
+
+        dynamic = torch.stack([row0, row1, row2, row3], dim=1)  # shape: (batch_size, 4, 4)
+        return dynamic
+
+
 
     def computeDerivative(self, X, dt=0.1):
         # make X require grad
@@ -130,7 +137,7 @@ def load_data():
 
     return train_data, trainP_data, test_data
 
-def train(model, X_train, y_train, X_test, epochs=500000, lr=0.0001):
+def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
 
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
@@ -194,7 +201,7 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.0001):
                                  f"Train Loss: {epoch_loss:.6f} | "
                                  f"Test Loss: {test_loss:.3e} | "
                                  f"LR: {optimizer.param_groups[0]['lr']:.6f} | "
-                                 f"lambda1: {model.lambda1:.6f}"
+                                 f"lambda1: {model.lambda1:.6f} | "
                                  f"lambda2: {model.lambda2:.6f}")
 
 
