@@ -47,8 +47,8 @@ class PINN(nn.Module):
         batch_size = X.shape[0]
         x3, x4 = X[:, 2], X[:, 3]
         a = (x3 ** 2 + x4 ** 2) ** (1/2)  # shape: (batch_size,)
-        c = self.lambda2 / (self.lambda1 ** 2)
-        b = 1 / self.lambda1
+        c = self.lambda2 # This corespons to q/m^2 
+        b = self.lambda1 # This coresponds to 1/m
 
         zeros = torch.zeros(batch_size, device=X.device)
 
@@ -117,6 +117,15 @@ class PINN(nn.Module):
         return X - (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
     def risidualLoss(self,X,Y,dt):
+        # Actual Loss
+        XPredA = self.rk4StepForward(X,dt)
+        YPredA = self.rk4StepBackwards(Y,dt)
+        XpA = XPredA[:,:2]
+        XqA = XPredA[:,2:]
+        YpA = YPredA[:,:2]
+        YqA = YPredA[:,2:]
+        XPredLossA = F.mse_loss(XpA,Y[:,:2]) + F.mse_loss(XqA,Y[:,2:])
+        YPredLossA = F.mse_loss(YpA,X[:,:2]) + F.mse_loss(YqA,X[:,2:])
         # Step forward and back
         XPred = self.Rrk4StepForward(X,dt)
         YPred = self.Rrk4StepBackwards(Y,dt)
@@ -128,7 +137,7 @@ class PINN(nn.Module):
         # Get all the losses
         XPredLoss = F.mse_loss(Xp,Y[:,:2]) + F.mse_loss(Xq,Y[:,2:])
         YPredLoss = F.mse_loss(Yp,X[:,:2]) + F.mse_loss(Yq,X[:,2:])
-        return YPredLoss + XPredLoss
+        return YPredLoss + XPredLoss + XPredLossA + YPredLossA
 
     def forward(self,X,dt):
         return self.rk4StepForward(X,dt)
@@ -184,7 +193,7 @@ def load_data(
 
     return train_data, trainP_data, test_data
 
-def train(model, X_train, y_train, X_test, epochs=500000, lr=0.0001):
+def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
     global sigma_p
     global sigma_x
 
@@ -254,8 +263,8 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.0001):
                                  f"Train Loss: {epoch_loss:.6f} | "
                                  f"Test Loss: {test_loss:.3e} | "
                                  f"LR: {optimizer.param_groups[0]['lr']:.6f} | "
-                                 f"lambda1: {model.lambda1:.6f} | "
-                                 f"lambda2: {model.lambda2:.6f}")
+                                 f"m: {1/model.lambda1:.6f} | "
+                                 f"q: {model.lambda2*((1/model.lambda1)**2):.6f}")
 
 
 def evaluate(model, X_test, steps=300):
