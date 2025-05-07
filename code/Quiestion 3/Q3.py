@@ -18,18 +18,37 @@ class PINN(nn.Module):
         self.model = nn.Sequential(
             nn.Linear(4, hidden_dim),
             nn.Tanh(),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
+            nn.SiLU(),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
+            nn.SiLU(),
+            nn.Dropout(0.2),
             nn.Linear(hidden_dim, 4)
         )
 
         # Learnable parameters with positive constraint using softplus
-        self.lambda1 = nn.Parameter(torch.tensor(0.5))
-        self.lambda2 = nn.Parameter(torch.tensor(0.5))
-        self.lambda3 = nn.Parameter(torch.tensor(0.5))
-        self.lambda4 = nn.Parameter(torch.tensor(0.5))
+        self.register_parameter('log_lambda1', nn.Parameter(torch.log(torch.tensor(0.5))))
+        self.register_parameter('log_lambda2', nn.Parameter(torch.log(torch.tensor(0.5))))
+        self.register_parameter('log_lambda3', nn.Parameter(torch.log(torch.tensor(0.5))))
+        self.register_parameter('log_lambda4', nn.Parameter(torch.log(torch.tensor(0.5))))
+
+    @property
+    def lambda1(self):
+        return torch.exp(self.log_lambda1)
+
+    @property
+    def lambda2(self):
+        return torch.exp(self.log_lambda2)
+
+    @property
+    def lambda3(self):
+        return torch.exp(self.log_lambda3)
+
+    @property
+    def lambda4(self):
+        return torch.exp(self.log_lambda4)
 
     def computeDerivative(self, X, dt=0.1):
         # make X require grad
@@ -69,8 +88,10 @@ class PINN(nn.Module):
         Yp = YPred[:,:2]
         Yq = YPred[:,2:]
         # Get all the losses
-        XPredLoss = self.lambda1 * F.mse_loss(Xp,Y[:,:2]) + self.lambda2 * F.mse_loss(Xq,Y[:,2:])
-        YPredLoss = self.lambda3 * F.mse_loss(Yp,X[:,:2]) + self.lambda4 * F.mse_loss(Yq,X[:,2:])
+        #XPredLoss = self.lambda1 * F.mse_loss(Xp,Y[:,:2]) + self.lambda2 * F.mse_loss(Xq,Y[:,2:])
+        #YPredLoss = self.lambda3 * F.mse_loss(Yp,X[:,:2]) + self.lambda4 * F.mse_loss(Yq,X[:,2:])
+        XPredLoss = F.mse_loss(Xp,Y[:,:2]) + F.mse_loss(Xq,Y[:,2:])
+        YPredLoss = F.mse_loss(Yp,X[:,:2]) + F.mse_loss(Yq,X[:,2:])
         return YPredLoss + XPredLoss
 
     def forward(self,X,dt):
@@ -110,7 +131,7 @@ def load_data():
 
     return train_data, trainP_data, test_data
 
-def train(model, X_train, y_train, X_test, epochs=500000, lr=0.01):
+def train(model, X_train, y_train, X_test, epochs=500000, lr=0.0001):
 
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
@@ -123,7 +144,6 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.01):
     )
 
     best_loss = float('inf')
-    no_improve = 0
     batch_size = 128
 
     # Learning rate scheduler
