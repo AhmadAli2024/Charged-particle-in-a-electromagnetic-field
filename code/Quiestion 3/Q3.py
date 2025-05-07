@@ -13,8 +13,8 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
 # Global variables
-sigma_x = None
-sigma_p = None
+sigma_x_std = None
+sigma_p_std = None
 
 def set_seed(seed=42):
     torch.manual_seed(seed)
@@ -127,14 +127,14 @@ class PINN(nn.Module):
 
     def risidualLoss(self,X,Y,dt):
         # Actual Loss
-        #XPredA = self.rk4StepForward(X,dt)
-        #YPredA = self.rk4StepBackwards(Y,dt)
-        #XpA = XPredA[:,:2]
-        #XqA = XPredA[:,2:]
-        #YpA = YPredA[:,:2]
-        #YqA = YPredA[:,2:]
-        #XPredLossA = F.mse_loss(XpA,Y[:,:2]) + F.mse_loss(XqA,Y[:,2:])
-        #YPredLossA = F.mse_loss(YpA,X[:,:2]) + F.mse_loss(YqA,X[:,2:])
+        XPredA = self.rk4StepForward(X,dt)
+        YPredA = self.rk4StepBackwards(Y,dt)
+        XpA = XPredA[:,:2]
+        XqA = XPredA[:,2:]
+        YpA = YPredA[:,:2]
+        YqA = YPredA[:,2:]
+        XPredLossA = F.mse_loss(XpA,Y[:,:2]) + F.mse_loss(XqA,Y[:,2:])
+        YPredLossA = F.mse_loss(YpA,X[:,:2]) + F.mse_loss(YqA,X[:,2:])
         # Step forward and back
         XPred = self.Rrk4StepForward(X,dt)
         YPred = self.Rrk4StepBackwards(Y,dt)
@@ -146,8 +146,7 @@ class PINN(nn.Module):
         # Get all the losses
         XPredLoss = F.mse_loss(Xp,Y[:,:2]) + F.mse_loss(Xq,Y[:,2:])
         YPredLoss = F.mse_loss(Yp,X[:,:2]) + F.mse_loss(Yq,X[:,2:])
-        #return YPredLoss + XPredLoss + XPredLossA + YPredLossA
-        return YPredLoss + XPredLoss 
+        return YPredLoss + XPredLoss + XPredLossA + YPredLossA
 
     def forward(self,X,dt):
         return self.rk4StepForward(X,dt)
@@ -176,8 +175,8 @@ def load_data(
     test_size:  int = 300,
     eps: float = 1e-8
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    global sigma_x
-    global sigma_p
+    global sigma_x_std
+    global sigma_p_std
     # Read raw lines
     with open(train_path, 'r') as f:
         raw_train = [list(map(float, line.split())) for line in f if line.strip()]
@@ -193,8 +192,8 @@ def load_data(
     mean = train_data.mean(dim=0, keepdim=True)
     std  = train_data.std(dim=0, keepdim=True) + eps
 
-    sigma_x = mean[0,:2]
-    sigma_p = mean[0,2:]
+    sigma_x_std = std[0,:2]
+    sigma_p_std = std[0,2:]
 
     # Apply normalization
     train_data  = (train_data  - mean) / std
@@ -204,8 +203,8 @@ def load_data(
     return train_data, trainP_data, test_data
 
 def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
-    global sigma_p
-    global sigma_x
+    global sigma_p_std
+    global sigma_x_std
 
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
@@ -266,8 +265,8 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
                     plot(X_test[:300], pred_trajectory, save_path=f'trajectory_epoch_{epoch}.png')
                     lambda1_norm = model.lambda1.item()
                     lambda2_norm = model.lambda2.item()
-                    lambda1_phys = lambda1_norm * (sigma_p**2 / sigma_x**2).mean().item()
-                    lambda2_phys = lambda2_norm * (sigma_p   / sigma_x).mean().item()
+                    lambda1_phys = lambda1_norm * (sigma_p_std**2 / sigma_x_std**2).mean().item()
+                    lambda2_phys = lambda2_norm * (sigma_p_std   / sigma_x_std).mean().item()
                 
             pbar.set_description(f"Epoch {epoch} | "
                                  f"Train Loss: {epoch_loss:.6f} | "
