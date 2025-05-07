@@ -11,17 +11,19 @@ from tqdm import tqdm
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
+# Global variables
+sigma_x = None
+sigma_p = None
+
 class PINN(nn.Module):
     def __init__(self, hidden_dim=128):
         super().__init__()
 
         self.model = nn.Sequential(
             nn.Linear(4, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.Tanh(),
+            nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -44,9 +46,9 @@ class PINN(nn.Module):
     def dynamicMatrix(self, X):
         batch_size = X.shape[0]
         x3, x4 = X[:, 2], X[:, 3]
-        a = (x3 ** 2 + x4 ** 2) ** 2  # shape: (batch_size,)
-        c = self.lambda1 / (self.lambda2 ** 2)
-        b = 1 / self.lambda2
+        a = (x3 ** 2 + x4 ** 2) ** (1/2)  # shape: (batch_size,)
+        c = self.lambda2 / (self.lambda1 ** 2)
+        b = 1 / self.lambda1
 
         zeros = torch.zeros(batch_size, device=X.device)
 
@@ -148,41 +150,53 @@ class PINN(nn.Module):
         return torch.stack(trajectory)
 
 
-def load_data():
-    # Load training data
-    with open('../../data/train.txt', 'r') as f:
-        train_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
-    
-    # Load testing data
-    with open('../../data/test.txt', 'r') as f:
-        test_lines = [list(map(float, line.strip().split())) for line in f if line.strip()]
+def load_data(
+    train_path: str = '../../data/train.txt',
+    test_path:  str = '../../data/test.txt',
+    train_size: int = 1200,
+    test_size:  int = 300,
+    eps: float = 1e-8
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    global sigma_x
+    global sigma_p
+    # Read raw lines
+    with open(train_path, 'r') as f:
+        raw_train = [list(map(float, line.split())) for line in f if line.strip()]
+    with open(test_path, 'r') as f:
+        raw_test  = [list(map(float, line.split())) for line in f if line.strip()]
 
-    # Process data
-    train_data = torch.tensor(train_lines[:1200], dtype=torch.float32)
-    trainP_data = torch.tensor(train_lines[1:1201], dtype=torch.float32)
-    test_data = torch.tensor(test_lines[:300], dtype=torch.float32)
-    
-    train_data = torch.nn.functional.normalize(train_data, p=2, dim=1)
-    test_data = torch.nn.functional.normalize(test_data, p=2, dim=1)
-    trainP_data = torch.nn.functional.normalize(trainP_data, p=2, dim=1)
+    # Convert to tensors and slice
+    train_data  = torch.tensor(raw_train[:train_size], dtype=torch.float32)
+    trainP_data = torch.tensor(raw_train[1:train_size+1], dtype=torch.float32)
+    test_data   = torch.tensor(raw_test[:test_size],  dtype=torch.float32)
+
+    # Compute per-feature mean and std on training set
+    #mean = train_data.mean(dim=0, keepdim=True)
+    #std  = train_data.std(dim=0, keepdim=True) + eps
+
+    #sigma_x = mean[0,:2]
+    #sigma_p = mean[0,2:]
+
+    # Apply normalization
+    #train_data  = (train_data  - mean) / std
+    #trainP_data = (trainP_data - mean) / std
+    #test_data   = (test_data   - mean) / std
 
     return train_data, trainP_data, test_data
 
-def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
+def train(model, X_train, y_train, X_test, epochs=500000, lr=0.0001):
+    global sigma_p
+    global sigma_x
 
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
-    #optimizer = torch.optim.AdamW(
-    #    model.parameters(),
-    #    lr=lr,              # or your specific learning rate
-    #    betas=(0.9, 0.999),   # default AdamW momentum settings
-    #    weight_decay=1e-3,
-    #    eps=1e-8              # numerical stability
-    #)
-    optimizer = torch.optim.AdamW([
-    {'params': pinn.model.parameters(),         'lr': 5e-3},
-    {'params': [pinn.log_lambda1, pinn.log_lambda2], 'lr': 1e-4},
-    ], weight_decay=1e-3)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=lr,              # or your specific learning rate
+        betas=(0.9, 0.999),   # default AdamW momentum settings
+        weight_decay=1e-3,
+        eps=1e-8              # numerical stability
+    )
 
     best_loss = float('inf')
     batch_size = 128
@@ -192,7 +206,7 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
     optimizer,
     mode='min',
     factor=0.7,
-    patience=5,
+    patience=10,
     min_lr=1e-6
     )
     
@@ -218,7 +232,7 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
             epoch_loss += loss
         
         # Validation
-        if epoch % 100 == 0:
+        if epoch % 50 == 0:
             model.eval()
             with torch.no_grad():
                 test_loss = evaluate(model, X_test)
@@ -231,6 +245,10 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
                     mse_T = F.mse_loss(pred_trajectory,X_test[:300],reduction='none').mean(dim=1)
                     plotMSE(mse_T,save_path=f'MSE_{epoch}.png')
                     plot(X_test[:300], pred_trajectory, save_path=f'trajectory_epoch_{epoch}.png')
+                    #lambda1_norm = model.lambda1.item()
+                    #lambda2_norm = model.lambda2.item()
+                    #lambda1_phys = lambda1_norm * (sigma_p**2 / sigma_x**2).mean().item()
+                    #lambda2_phys = lambda2_norm * (sigma_p   / sigma_x).mean().item()
                 
             pbar.set_description(f"Epoch {epoch} | "
                                  f"Train Loss: {epoch_loss:.6f} | "
