@@ -47,8 +47,8 @@ class PINN(nn.Module):
         batch_size = X.shape[0]
         x3, x4 = X[:, 2], X[:, 3]
         a = (x3 ** 2 + x4 ** 2) ** (1/2)  # shape: (batch_size,)
-        c = self.lambda2 # This corespons to q/m^2 
         b = self.lambda1 # This coresponds to 1/m
+        c = self.lambda2 * b # This corespons to q/m^2 
 
         zeros = torch.zeros(batch_size, device=X.device)
 
