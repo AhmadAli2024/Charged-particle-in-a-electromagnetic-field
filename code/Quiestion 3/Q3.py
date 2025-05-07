@@ -166,7 +166,7 @@ def load_data():
 
     return train_data, trainP_data, test_data
 
-def train(model, X_train, y_train, X_test, epochs=500000, lr=0.005):
+def train(model, X_train, y_train, X_test, epochs=500000, lr=0.001):
 
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
