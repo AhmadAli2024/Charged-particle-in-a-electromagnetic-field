@@ -7,8 +7,10 @@ import numpy as np
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
+# Get GPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# Extended Symp Net Modules
 class SigmaBlock(nn.Module):
     def __init__(self, d, c_dim, l, nonlinearity=torch.tanh):
         super().__init__()
@@ -66,9 +68,7 @@ class ExtendedSympNet(nn.Module):
 
         return torch.cat([p, q, c], dim=1)
 
-
-
-
+# Transformer to change the coordanients of the system 
 class NICECouplingLayer(nn.Module):
     def __init__(self, dim, hidden_dim):
         super().__init__()
@@ -93,6 +93,7 @@ class NICECouplingLayer(nn.Module):
         return torch.cat([x1, x2], dim=1)
 
 
+# Complete Poission Neural Network
 class PNN(nn.Module):
     def __init__(self):
         super().__init__()
@@ -175,24 +176,27 @@ def train(model, X_train, y_train, X_test, epochs=500000, lr=0.01):
         X_train, y_train = X_train[perm], y_train[perm]
         
         for i in range(0, len(X_train), batch_size):
+            # Get batches
             X_batch = X_train[i:i+batch_size].requires_grad_(True)
             y_batch = y_train[i:i+batch_size]
             
+            # Zero out the gradients
             optimizer.zero_grad()
+
+            # Forward 
             pred = model(X_batch)
+
+            # Get loss
             loss = F.mse_loss(pred, y_batch)
             
             loss.backward()
+
+            # clip gradients for stable learning
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
             
             epoch_loss += loss.item()
         
-        # Enforce symplecticity
-        if epoch % 100 == 0:
-            pass
-            #model.sympNet.enforce_symplecticity()
-
         # Validation
         if epoch % 100 == 0:
             model.eval()

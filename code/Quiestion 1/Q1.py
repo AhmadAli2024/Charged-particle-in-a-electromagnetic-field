@@ -6,8 +6,7 @@ import os
 import numpy as np
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-# Standard symplectic matrix J
-J = torch.tensor([[0, 1], [-1, 0]], dtype=torch.float32)
+# Get the GPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # --- Symplectic Modules ---

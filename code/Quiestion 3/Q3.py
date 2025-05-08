@@ -9,13 +9,15 @@ from torch.utils.data import DataLoader, TensorDataset
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from tqdm import tqdm
 
+# Get GPU
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Using device: {device}")
 
-# Global variables
+# Global variables for normalization
 sigmaN = None
 muN  = None
 
+# Set seed to make sure lambdas calculated are correct
 def set_seed(seed=42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
@@ -52,6 +54,7 @@ class PINN(nn.Module):
     def lambda2(self):
         return torch.exp(self.log_lambda2)
 
+    # Used for the risidual loss
     def dynamicMatrix(self, X):
         batch_size = X.shape[0]
         x3, x4 = X[:, 2], X[:, 3]
@@ -70,7 +73,7 @@ class PINN(nn.Module):
         return dynamic
 
 
-
+    # Get the derivative for the normal forward step
     def computeDerivative(self, X, dt=0.1):
         # make X require grad
         X = X.requires_grad_()
@@ -83,6 +86,7 @@ class PINN(nn.Module):
 
         return torch.cat((dH_pos, dH_neg), dim=1)
 
+    # RK4 integrator to predict next step 
     def rk4StepForward(self, X, dt):
         k1 = self.computeDerivative(X)
         k2 = self.computeDerivative(X + 0.5 * dt * k1)
@@ -91,6 +95,7 @@ class PINN(nn.Module):
 
         return X + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
+    # RK4 integrator to reconstruct the initial input
     def rk4StepBackwards(self, X, dt):
         k1 = self.computeDerivative(X)
         k2 = self.computeDerivative(X - 0.5 * dt * k1)
@@ -99,6 +104,7 @@ class PINN(nn.Module):
 
         return X - (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
+    # Calculate the motion equation
     def risidualFunc(self,X,dt=0.1):
         # make X require grad
         X = X.requires_grad_()
@@ -109,6 +115,7 @@ class PINN(nn.Module):
         dynamic = self.dynamicMatrix(X)
         return torch.bmm(dynamic, dH.unsqueeze(2)).squeeze(2)
 
+    # Risidual RK4 step forward with learned parameters
     def Rrk4StepForward(self, X, dt=0.1):
         k1 = self.risidualFunc(X)
         k2 = self.risidualFunc(X + 0.5 * dt * k1)
@@ -117,6 +124,7 @@ class PINN(nn.Module):
 
         return X + (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
+    # Risidual RK4 step backward with learned parameters
     def Rrk4StepBackwards(self, X, dt=0.1):
         k1 = self.risidualFunc(X)
         k2 = self.risidualFunc(X - 0.5 * dt * k1)
@@ -125,6 +133,7 @@ class PINN(nn.Module):
 
         return X - (dt / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
 
+    # Get risidual physics loss
     def risidualLoss(self,X,Y,dt):
         # Step forward and back
         XPred = self.Rrk4StepForward(X,dt)
@@ -139,9 +148,11 @@ class PINN(nn.Module):
         YPredLoss = F.mse_loss(Yp,X[:,:2]) + F.mse_loss(Yq,X[:,2:])
         return YPredLoss + XPredLoss
 
+    # Forward with the hamiltonian 
     def forward(self,X,dt):
         return self.rk4StepForward(X,dt)
 
+    # Forward with the learned parameters 
     def learnedForward(self,X,dt):
         return self.Rrk4StepForward(X,dt)
 
