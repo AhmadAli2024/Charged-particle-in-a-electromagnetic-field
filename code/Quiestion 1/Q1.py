@@ -138,17 +138,14 @@ class SympNet(nn.Module):
     def __init__(self, dim, hidden_dim=64, num_blocks=4):
         super().__init__()
         self.dim = dim
+        self.hidden = hidden_dim
         
         # Build network with clearer structure
         layers = []
         for _ in range(num_blocks):
             layers.extend([
-                LinearUp(dim), 
-                ActivationLow(dim),
-                GradientUp(dim, hidden_dim),
-                LinearLow(dim),
-                GradientLow(dim, hidden_dim),
-                ActivationUp(dim)
+                GradientUp(dim,self.hidden),
+                GradientLow(dim,self.hidden)
             ])
         
         self.net = nn.Sequential(*layers)
@@ -299,8 +296,8 @@ def plotMSE(loss, save_path='test.png', show=True):
     plt.close()
 
 
-def train(model, X_train, y_train, X_test, epochs=5000000, lr=0.001, batch_size=512, 
-          save_path='best_model.pth', patience=10):
+def train(model, X_train, y_train, X_test, epochs=5000000, lr=0.005, batch_size=128, 
+          save_path='best_model.pth'):
     """Train the model with improved techniques"""
     model = model.to(device)
     X_train, y_train, X_test = X_train.to(device), y_train.to(device), X_test.to(device)
@@ -315,7 +312,7 @@ def train(model, X_train, y_train, X_test, epochs=5000000, lr=0.001, batch_size=
     )
     
     # Learning rate scheduler
-    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+    scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20, verbose=True)
     
     # Early stopping variables
     best_loss = float('inf')
@@ -382,29 +379,25 @@ def train(model, X_train, y_train, X_test, epochs=5000000, lr=0.001, batch_size=
             # Print training progress
             print(f"Epoch {epoch} | Train Loss: {epoch_loss:.6f} | Test Loss: {test_loss:.6f} | LR: {optimizer.param_groups[0]['lr']:.6f}")
             
-            # Early stopping
-            if no_improvement >= patience:
-                print(f"Early stopping at epoch {epoch}")
-                break
 
 if __name__ == "__main__":
     # Set random seed for reproducibility
     torch.manual_seed(42)
     
     # Configure paths (adjust these)
-    train_path = '../data/train.txt'
-    test_path = '../data/test.txt'
+    train_path = '../../data/train.txt'
+    test_path = '../../data/test.txt'
     
     try:
         # Load data
         X_train, y_train, X_test = load_data(train_path, test_path)
         
         # Create model
-        model = SympNet(dim=2, hidden_dim=128, num_blocks=4)
+        model = SympNet(dim=2, hidden_dim=128, num_blocks=8)
         print(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
         
         # Train model
-        train(model, X_train, y_train, X_test, epochs=100000, patience=20)
+        train(model, X_train, y_train, X_test, epochs=100000)
         
         # Final evaluation
         best_model = SympNet(dim=2, hidden_dim=128, num_blocks=4)
